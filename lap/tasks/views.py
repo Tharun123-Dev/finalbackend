@@ -2,6 +2,7 @@ from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import BasePermission
 
 from accounts.models import User
 from accounts.tenant_utils import get_tenant_id
@@ -10,17 +11,47 @@ from .models import Task, TaskActivity, TaskComment, TaskNotification
 from .serializers import TaskNotificationSerializer, TaskSerializer, TaskUserSerializer
 
 
+class TaskViewPermission(BasePermission):
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser or getattr(request.user, '_java_is_superuser', False):
+            return True
+        return any(request.user.has_perm_code(code) for code in ['view_tasks', 'view_team_tasks', 'assign_task'])
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superuser or getattr(request.user, '_java_is_superuser', False):
+            return True
+        if any(request.user.has_perm_code(code) for code in ['view_team_tasks', 'assign_task']):
+            return True
+        return obj.assigned_to == request.user
+
+
+class TaskEditPermission(BasePermission):
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superuser or getattr(request.user, '_java_is_superuser', False):
+            return True
+        if any(request.user.has_perm_code(code) for code in ['edit_task', 'assign_task']):
+            return True
+        return obj.assigned_to == request.user
+
+
 class TaskViewSet(viewsets.ModelViewSet):
     serializer_class = TaskSerializer
 
     def get_permissions(self):
+        if self.action == 'mark_notifications_read':
+            return [IsAuthenticatedUser()]
         if self.action in ['list', 'retrieve', 'dashboard', 'members', 'notifications']:
-            return [make_any_permission('view_tasks', 'view_team_tasks', 'assign_task')()]
+            return [TaskViewPermission()]
         if self.action == 'create':
             return [make_permission('create_task')()]
         if self.action in ['destroy']:
             return [make_permission('delete_task')()]
-        return [make_any_permission('edit_task', 'assign_task')()]
+        return [TaskEditPermission()]
 
     def get_queryset(self):
         user = self.request.user
@@ -29,10 +60,14 @@ class TaskViewSet(viewsets.ModelViewSet):
             'comments__author', 'history__user'
         ).filter(tenant_id=tenant_id)
 
+        if not user or not user.is_authenticated:
+            return qs.none()
+
         if user.has_perm_code('view_team_tasks') or user.has_perm_code('assign_task'):
             return qs
 
-        return qs.filter(Q(assigned_to=user) | Q(assigned_by=user))
+        return qs.filter(assigned_to=user)
+
 
     def perform_create(self, serializer):
         task = serializer.save(
