@@ -1,0 +1,221 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --color-background: oklch(0.99 0.002 247);
+  --color-foreground: oklch(0.12 0.01 260);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.12 0.01 260);
+  --color-primary: oklch(0.52 0.19 262);
+  --color-primary-foreground: oklch(0.99 0 0);
+  --color-secondary: oklch(0.96 0.01 260);
+  --color-secondary-foreground: oklch(0.20 0.02 260);
+  --color-muted: oklch(0.95 0.008 260);
+  --color-muted-foreground: oklch(0.38 0.02 260);
+  --color-accent: oklch(0.93 0.02 262);
+  --color-accent-foreground: oklch(0.20 0.02 260);
+  --color-border: oklch(0.88 0.01 260);
+  --color-input: oklch(0.98 0.002 247);
+  --color-ring: oklch(0.52 0.19 262);
+  --color-destructive: oklch(0.55 0.22 25);
+  --color-success: oklch(0.45 0.15 155);
+  --color-warning: oklch(0.65 0.15 85);
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+
+  /* Theme-aware slate fallbacks for migrated modules and forms */
+  --color-slate-950: oklch(0.98 0.002 247);
+  --color-slate-900: oklch(1 0 0);
+  --color-slate-850: oklch(0.88 0.01 260);
+  --color-slate-800: oklch(0.88 0.01 260);
+  --color-slate-700: oklch(0.82 0.01 260);
+  --color-slate-600: oklch(0.38 0.02 260);
+  --color-slate-500: oklch(0.38 0.02 260);
+  --color-slate-400: oklch(0.20 0.02 260);
+  --color-slate-300: oklch(0.12 0.01 260);
+  --color-slate-200: oklch(0.12 0.01 260);
+  --color-slate-100: oklch(0.12 0.01 260);
+  --color-slate-50: oklch(0.12 0.01 260);
+  --color-slate-955: oklch(0.94 0.01 260);
+}
+
+.dark {
+  --color-background: oklch(0.14 0.02 260);
+  --color-foreground: oklch(0.96 0.01 260);
+  --color-card: oklch(0.18 0.02 260);
+  --color-card-foreground: oklch(0.96 0.01 260);
+  --color-primary: oklch(0.62 0.19 262);
+  --color-primary-foreground: oklch(0.99 0 0);
+  --color-secondary: oklch(0.22 0.02 260);
+  --color-secondary-foreground: oklch(0.92 0.01 260);
+  --color-muted: oklch(0.22 0.02 260);
+  --color-muted-foreground: oklch(0.65 0.02 260);
+  --color-accent: oklch(0.24 0.03 262);
+  --color-accent-foreground: oklch(0.96 0.01 260);
+  --color-border: oklch(0.28 0.02 260);
+  --color-input: oklch(0.14 0.02 260);
+
+  /* Theme-aware slate fallbacks for dark mode */
+  --color-slate-950: oklch(0.14 0.02 260);
+  --color-slate-900: oklch(0.18 0.02 260);
+  --color-slate-850: oklch(0.28 0.02 260);
+  --color-slate-800: oklch(0.28 0.02 260);
+  --color-slate-700: oklch(0.34 0.02 260);
+  --color-slate-600: oklch(0.55 0.02 260);
+  --color-slate-500: oklch(0.65 0.02 260);
+  --color-slate-400: oklch(0.85 0.01 260);
+  --color-slate-300: oklch(0.92 0.01 260);
+  --color-slate-200: oklch(0.96 0.01 260);
+  --color-slate-100: oklch(0.98 0.01 260);
+  --color-slate-50: oklch(0.99 0.01 260);
+  --color-slate-955: oklch(0.22 0.02 260);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+@utility border-border {
+  border-color: var(--color-border);
+}
+@utility bg-background {
+  background-color: var(--color-background);
+}
+@utility text-foreground {
+  color: var(--color-foreground);
+}
+@utility bg-card {
+  background-color: var(--color-card);
+}
+@utility text-card-foreground {
+  color: var(--color-card-foreground);
+}
+@utility bg-primary {
+  background-color: var(--color-primary);
+}
+@utility text-primary-foreground {
+  color: var(--color-primary-foreground);
+}
+@utility bg-secondary {
+  background-color: var(--color-secondary);
+}
+@utility text-secondary-foreground {
+  color: var(--color-secondary-foreground);
+}
+@utility bg-muted {
+  background-color: var(--color-muted);
+}
+@utility text-muted-foreground {
+  color: var(--color-muted-foreground);
+}
+@utility bg-accent {
+  background-color: var(--color-accent);
+}
+@utility text-accent-foreground {
+  color: var(--color-accent-foreground);
+}
+@utility bg-input {
+  background-color: var(--color-input);
+}
+@utility ring-ring {
+  --tw-ring-color: var(--color-ring);
+}
+
+@utility btn-primary {
+  @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium h-10 px-4 py-2 bg-primary text-primary-foreground shadow-sm transition-all hover:opacity-90 active:scale-95 disabled:pointer-events-none disabled:opacity-50 cursor-pointer;
+}
+
+@utility btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium h-10 px-4 py-2 border border-border bg-card text-foreground shadow-sm transition-all hover:bg-accent hover:text-accent-foreground active:scale-95 disabled:pointer-events-none disabled:opacity-50 cursor-pointer;
+}
+
+@utility input-field {
+  @apply flex h-10 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-50 text-foreground;
+}
+
+@layer components {
+  .crm-workspace {
+    position: relative;
+    isolation: isolate;
+    color: var(--color-foreground);
+    padding: 0.25rem;
+  }
+
+  .crm-workspace::before {
+    content: '';
+    position: absolute;
+    inset: -1.25rem -0.75rem auto;
+    height: 12rem;
+    background:
+      radial-gradient(circle at top left, color-mix(in oklch, var(--color-primary) 16%, transparent), transparent 60%),
+      radial-gradient(circle at top right, color-mix(in oklch, var(--color-accent) 14%, transparent), transparent 55%);
+    opacity: 0.9;
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  .crm-workspace > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .crm-workspace .rounded-3xl,
+  .crm-workspace .rounded-2xl,
+  .crm-workspace .rounded-xl {
+    border-radius: var(--radius-lg);
+  }
+
+  .crm-workspace .rounded-xl.border.bg-card,
+  .crm-workspace .rounded-2xl.border.bg-card,
+  .crm-workspace .rounded-3xl.border.bg-card {
+    border-color: color-mix(in oklch, var(--color-border) 88%, var(--color-primary) 12%);
+    box-shadow:
+      0 1px 2px color-mix(in srgb, black 6%, transparent),
+      0 12px 36px color-mix(in srgb, black 8%, transparent);
+  }
+
+  .crm-workspace input,
+  .crm-workspace select,
+  .crm-workspace textarea {
+    max-width: 100%;
+    color: var(--color-foreground);
+    background-color: var(--color-card);
+    border-color: var(--color-border);
+  }
+
+  .crm-workspace select {
+    min-width: 0;
+  }
+
+  .crm-workspace table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .crm-workspace th,
+  .crm-workspace td {
+    vertical-align: middle;
+  }
+
+  .crm-workspace thead th {
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .crm-workspace tbody tr:last-child td {
+    border-bottom-width: 0;
+  }
+
+  .crm-workspace .custom-scrollbar,
+  .crm-workspace [class*="overflow-x"] {
+    scrollbar-width: thin;
+  }
+}

@@ -7,7 +7,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 # ✅ make_permission only — no HasPermission
 from utils.permissions import make_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
-from .models import User
+from .models import CustomRole, User
 from .serializers import MyTokenObtainPairSerializer, CreateUserSerializer, UserSerializer
 
 
@@ -29,10 +29,68 @@ class ListUsersView(generics.ListAPIView):
 
     def get_queryset(self):
         role = self.request.query_params.get('role')
-        qs = User.objects.filter(tenant_id=get_tenant_id(self.request)).order_by('-date_joined')
+        from employees.access import visible_user_queryset
+
+        qs = visible_user_queryset(self.request, include_self=True).order_by('-date_joined')
         if role:
             qs = qs.filter(role=role)
         return qs
+
+
+class SupervisorOptionsView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        role_id = request.query_params.get('roleId') or request.query_params.get('role_id')
+        tenant_id = get_tenant_id(request)
+        target_role = None
+        target_level = None
+
+        if role_id:
+            try:
+                custom_role = CustomRole.objects.get(pk=role_id, tenant_id=tenant_id, is_active=True)
+                target_role = custom_role.base_role
+                target_level = custom_role.level
+            except (CustomRole.DoesNotExist, ValueError, TypeError):
+                target_role = None
+
+        if not target_role:
+            target_role = request.query_params.get('role') or 'employee'
+
+        target_role = str(target_role).lower()
+
+        from employees.access import visible_user_queryset
+
+        qs = visible_user_queryset(request, include_self=True).exclude(id=request.query_params.get('excludeUserId') or None)
+
+        if target_level is not None:
+            qs = qs.filter(custom_role__level__lt=target_level) | qs.filter(
+                role__in=['superadmin', 'admin', 'hr', 'manager']
+            )
+        elif target_role in ['superadmin']:
+            qs = qs.none()
+        elif target_role in ['admin', 'hr']:
+            qs = qs.filter(role__in=['superadmin', 'admin'])
+        elif target_role == 'manager':
+            qs = qs.filter(role__in=['superadmin', 'admin', 'hr'])
+        else:
+            qs = qs.filter(role__in=['superadmin', 'admin', 'hr', 'manager'])
+
+        supervisors = []
+        seen = set()
+        for user in qs.select_related('profile', 'custom_role').order_by('first_name', 'last_name', 'username'):
+            if user.id in seen:
+                continue
+            seen.add(user.id)
+            display_name = user.get_full_name() or user.username
+            emp_code = getattr(getattr(user, 'profile', None), 'emp_code', '')
+            supervisors.append({
+                'id': user.id,
+                'name': f'{display_name} ({emp_code})' if emp_code else display_name,
+                'role': user.get_display_role(),
+            })
+
+        return Response(supervisors)
 
 
 class MeView(APIView):
@@ -47,7 +105,9 @@ class UpdateUserView(generics.RetrieveUpdateAPIView):
     permission_classes = [make_permission('edit_user')]
 
     def get_queryset(self):
-        return User.objects.filter(tenant_id=get_tenant_id(self.request))
+        from employees.access import visible_user_queryset
+
+        return visible_user_queryset(self.request, include_self=True)
 
 # ADD to accounts/views.py
 

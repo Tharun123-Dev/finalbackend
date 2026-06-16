@@ -22,17 +22,19 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
     first_name     = serializers.CharField(source='user.first_name',     read_only=True)
     last_name      = serializers.CharField(source='user.last_name',      read_only=True)
     email          = serializers.CharField(source='user.email',          read_only=True)
-    role           = serializers.CharField(source='user.role',           read_only=True)
+    role           = serializers.SerializerMethodField()
+    base_role      = serializers.SerializerMethodField()
     employee_type  = serializers.CharField(source='user.employee_type',  read_only=True)
     is_active      = serializers.BooleanField(source='user.is_active',   read_only=True)
     department_name = serializers.CharField(source='department.name',    read_only=True)
     manager_name   = serializers.SerializerMethodField()
+    display_name   = serializers.SerializerMethodField()
 
     class Meta:
         model  = EmployeeProfile
         fields = [
             'id', 'user_id','emp_code', 'username', 'first_name', 'last_name',
-            'email', 'role', 'employee_type', 'is_active',
+            'email', 'display_name', 'role', 'base_role', 'employee_type', 'is_active',
             'department', 'department_name', 'designation', 'work_mode',
             'date_of_birth', 'joining_date', 'phone', 'address',
             'manager', 'manager_name',
@@ -44,6 +46,15 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
         if obj.manager:
             return obj.manager.get_full_name() or obj.manager.username
         return None
+
+    def get_display_name(self, obj):
+        return obj.user.get_full_name() or obj.user.username
+
+    def get_role(self, obj):
+        return obj.user.get_display_role()
+
+    def get_base_role(self, obj):
+        return obj.user.get_effective_role()
 
 # employees/serializers.py — updated CreateEmployeeSerializer (replace class)
 class CreateEmployeeSerializer(serializers.Serializer):

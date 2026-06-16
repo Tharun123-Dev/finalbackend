@@ -296,7 +296,7 @@ class User(AbstractUser):
     def get_permissions_list(self):
         """
         Django superuser: all permissions granted.
-        Normal users: only explicitly granted user permissions.
+        Normal users: role defaults, adjusted by explicit user overrides.
         """
         java_permissions = getattr(self, '_java_permissions', None)
         if java_permissions is not None:
@@ -311,15 +311,24 @@ class User(AbstractUser):
                 return _expand_permission_codes(java_permissions)
             return []
 
-        from utils.models import Permission, UserPermissionOverride
+        from utils.models import Permission, RolePermission, UserPermissionOverride
 
         if self.is_superuser:
             return _expand_permission_codes(Permission.objects.values_list('code', flat=True))
 
-        return _expand_permission_codes(UserPermissionOverride.objects.filter(
-            user=self,
+        role = self.get_effective_role()
+        granted = set(RolePermission.objects.filter(
+            role=role,
             is_granted=True,
         ).values_list('permission__code', flat=True))
+
+        for override in UserPermissionOverride.objects.filter(user=self).select_related('permission'):
+            if override.is_granted:
+                granted.add(override.permission.code)
+            else:
+                granted.discard(override.permission.code)
+
+        return _expand_permission_codes(granted)
 
     def has_perm_code(self, code):
         java_permissions = getattr(self, '_java_permissions', None)
@@ -350,13 +359,20 @@ class User(AbstractUser):
 
             return False
 
-        from utils.models import UserPermissionOverride
+        from utils.models import RolePermission, UserPermissionOverride
 
         if self.is_superuser:
             return True
 
-        return UserPermissionOverride.objects.filter(
+        override = UserPermissionOverride.objects.filter(
             user=self,
+            permission__code=code,
+        ).first()
+        if override is not None:
+            return override.is_granted
+
+        return RolePermission.objects.filter(
+            role=self.get_effective_role(),
             permission__code=code,
             is_granted=True,
         ).exists()

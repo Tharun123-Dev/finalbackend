@@ -5,6 +5,7 @@ from django.urls import path, include
 urlpatterns = [
     path('admin/',                    admin.site.urls),
     path('api/',                      include('employees.urls')),
+    path('api/',                      include('accounts.urls')),
     path('api/',                      include('leave.urls')),
     path('api/',                      include('attendance.urls')),
     path('api/',                      include('payroll.urls')),
@@ -18,6 +19,7 @@ urlpatterns = [
     # Backward-compatible routes for frontends that call module paths directly
     # instead of using the /api prefix.
     path('',                           include('employees.urls')),
+    path('',                           include('accounts.urls')),
     path('',                           include('leave.urls')),
     path('',                           include('attendance.urls')),
     path('',                           include('payroll.urls')),

@@ -1,0 +1,370 @@
+// src/modules/leads/pages/LeadsList.jsx
+import React from 'react';
+import { useLeads } from '@/modules/leads/hooks/useLeads';
+import LeadTable from '@/modules/leads/components/LeadTable';
+import { Button } from '@/components/ui/button';
+import { Link } from 'react-router-dom';
+
+export default function LeadsList() {
+  const { data: leads = [], isLoading, isError } = useLeads();
+
+  return (
+    <div className="p-4">
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-2xl font-bold">Leads</h1>
+        <Link to="/leads/create">
+          <Button>Create Lead</Button>
+        </Link>
+      </div>
+      {isLoading && <p>Loading leads...</p>}
+      {isError && <p className="text-red-500">Failed to load leads.</p>}
+      <LeadTable leads={leads} />
+    </div>
+  );
+}
+
+// src/modules/leads/pages/LeadCreate.jsx
+import React from 'react';
+import DynamicFormRenderer from '@/modules/leads/renderer/DynamicFormRenderer';
+
+export default function LeadCreate() {
+  return (
+    <div className="p-4">
+      <h1 className="text-2xl font-bold mb-4">Create Lead</h1>
+      <DynamicFormRenderer />
+    </div>
+  );
+}
+
+// src/modules/leads/pages/LeadDetails.jsx
+import React from 'react';
+import { useParams } from 'react-router-dom';
+import { useLead } from '@/modules/leads/hooks/useLead';
+import LeadHeader from '@/modules/leads/components/LeadHeader';
+
+export default function LeadDetails() {
+  const { id } = useParams();
+  const { data: lead, isLoading, isError } = useLead(id);
+
+  if (isLoading) return <p>Loading lead...</p>;
+  if (isError) return <p className="text-red-500">Error loading lead.</p>;
+
+  return (
+    <div className="p-4">
+      <LeadHeader lead={lead} />
+      {/* Additional tabs and details can be added here */}
+    </div>
+  );
+}
+
+// src/modules/leads/pages/LeadPipeline.jsx
+import React from 'react';
+import { Card } from '@/components/ui/card';
+
+export default function LeadPipeline() {
+  return (
+    <div className="p-4">
+      <h1 className="text-2xl font-bold mb-4">Lead Pipeline</h1>
+      <Card className="p-4">Kanban board placeholder</Card>
+    </div>
+  );
+}
+
+// src/modules/leads/pages/LeadFollowups.jsx
+import React from 'react';
+import { Calendar } from '@/components/ui/calendar'; // assume exists
+
+export default function LeadFollowups() {
+  return (
+    <div className="p-4">
+      <h1 className="text-2xl font-bold mb-4">Follow‑ups</h1>
+      <Calendar />
+    </div>
+  );
+}
+
+// src/modules/leads/pages/LeadsDashboard.jsx
+import React from 'react';
+import { Card } from '@/components/ui/card';
+
+export default function LeadsDashboard() {
+  return (
+    <div className="p-4 grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+      <Card className="p-4">Total Leads</Card>
+      <Card className="p-4">Qualified Leads</Card>
+      <Card className="p-4">Converted Leads</Card>
+      {/* Add more KPI cards and charts as needed */}
+    </div>
+  );
+}
+
+// src/modules/leads/components/LeadTable.jsx
+import React from 'react';
+import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@/components/ui/table';
+
+export default function LeadTable({ leads }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Lead Name</TableHead>
+          <TableHead>Company</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Priority</TableHead>
+          <TableHead>Assigned To</TableHead>
+          <TableHead>Follow‑up Date</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {leads.map((lead) => (
+          <TableRow key={lead.id}>
+            <TableCell>{lead.name}</TableCell>
+            <TableCell>{lead.company}</TableCell>
+            <TableCell>{lead.status}</TableCell>
+            <TableCell>{lead.priority}</TableCell>
+            <TableCell>{lead.assigned_to?.name}</TableCell>
+            <TableCell>{lead.followup_date}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+// src/modules/leads/components/LeadHeader.jsx
+import React from 'react';
+import { Avatar } from '@/components/ui/avatar';
+
+export default function LeadHeader({ lead }) {
+  return (
+    <div className="flex items-center space-x-4 mb-4">
+      <Avatar>{lead.name?.charAt(0)}</Avatar>
+      <div>
+        <h2 className="text-xl font-semibold">{lead.name}</h2>
+        <p className="text-muted-foreground">{lead.company}</p>
+      </div>
+    </div>
+  );
+}
+
+// src/modules/leads/services/leadsApi.js
+import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react';
+
+export const leadsApi = createApi({
+  reducerPath: 'leadsApi',
+  baseQuery: fetchBaseQuery({ baseUrl: '/api' }),
+  tagTypes: ['Leads'],
+  endpoints: (builder) => ({
+    getLeads: builder.query({
+      query: () => 'leads',
+      providesTags: (result) =>
+        result ? [...result.map(({ id }) => ({ type: 'Leads', id })), 'Leads'] : ['Leads'],
+    }),
+    getLead: builder.query({
+      query: (id) => `leads/${id}`,
+      providesTags: (result, error, id) => [{ type: 'Leads', id }],
+    }),
+    createLead: builder.mutation({
+      query: (payload) => ({
+        url: 'leads',
+        method: 'POST',
+        body: payload,
+      }),
+      invalidatesTags: ['Leads'],
+    }),
+    updateLead: builder.mutation({
+      query: ({ id, ...patch }) => ({
+        url: `leads/${id}`,
+        method: 'PUT',
+        body: patch,
+      }),
+      invalidatesTags: (result, error, { id }) => [{ type: 'Leads', id }],
+    }),
+    deleteLead: builder.mutation({
+      query: (id) => ({ url: `leads/${id}`, method: 'DELETE' }),
+      invalidatesTags: ['Leads'],
+    }),
+    getLeadSchema: builder.query({
+      query: () => 'modules/leads/form-schema',
+    }),
+  }),
+});
+
+export const {
+  useGetLeadsQuery,
+  useGetLeadQuery,
+  useCreateLeadMutation,
+  useUpdateLeadMutation,
+  useDeleteLeadMutation,
+  useGetLeadSchemaQuery,
+} = leadsApi;
+
+// src/modules/leads/hooks/useLeads.js
+import { useGetLeadsQuery } from '@/modules/leads/services/leadsApi';
+
+export const useLeads = () => {
+  const { data, error, isLoading } = useGetLeadsQuery();
+  return { data, isError: !!error, isLoading };
+};
+
+// src/modules/leads/hooks/useLead.js
+import { useGetLeadQuery } from '@/modules/leads/services/leadsApi';
+
+export const useLead = (id) => {
+  const { data, error, isLoading } = useGetLeadQuery(id, { skip: !id });
+  return { data, isError: !!error, isLoading };
+};
+
+// src/modules/leads/store/leadsSlice.js
+import { createSlice } from '@reduxjs/toolkit';
+import { leadsApi } from '@/modules/leads/services/leadsApi';
+
+const leadsSlice = createSlice({
+  name: 'leads',
+  initialState: {},
+  reducers: {},
+  extraReducers: (builder) => {
+    builder.addMatcher(
+      leadsApi.endpoints.getLeads.matchFulfilled,
+      (state, { payload }) => {
+        // optional: store normalized leads if needed
+      }
+    );
+  },
+});
+
+export default leadsSlice.reducer;
+
+// src/modules/leads/routes/leadsRoutes.jsx
+import LeadsList from '@/modules/leads/pages/LeadsList';
+import LeadCreate from '@/modules/leads/pages/LeadCreate';
+import LeadDetails from '@/modules/leads/pages/LeadDetails';
+import LeadPipeline from '@/modules/leads/pages/LeadPipeline';
+import LeadFollowups from '@/modules/leads/pages/LeadFollowups';
+import LeadsDashboard from '@/modules/leads/pages/LeadsDashboard';
+import FormBuilder from '@/modules/leads/pages/FormBuilder'; // placeholder if exists
+
+const leadsRoutes = [
+  { path: '/leads', element: <LeadsList /> },
+  { path: '/leads/create', element: <LeadCreate /> },
+  { path: '/leads/:id', element: <LeadDetails /> },
+  { path: '/leads/pipeline', element: <LeadPipeline /> },
+  { path: '/leads/followups', element: <LeadFollowups /> },
+  { path: '/leads', element: <LeadsDashboard /> },
+];
+
+export default leadsRoutes;
+
+// src/modules/leads/renderer/DynamicFormRenderer.jsx
+import React from 'react';
+import { useGetLeadSchemaQuery, useCreateLeadMutation } from '@/modules/leads/services/leadsApi';
+import UniversalFieldRenderer from '@/modules/leads/renderer/UniversalFieldRenderer';
+import { Button } from '@/components/ui/button';
+import { useForm } from 'react-hook-form';
+
+export default function DynamicFormRenderer() {
+  const { data: schema, isLoading } = useGetLeadSchemaQuery();
+  const [createLead] = useCreateLeadMutation();
+  const { handleSubmit, register, setValue } = useForm();
+
+  if (isLoading) return <p>Loading form...</p>;
+
+  const onSubmit = async (values) => {
+    await createLead(values);
+    // optionally show success toast
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+      {schema.sections.map((section) => (
+        <div key={section.title} className="border p-4 rounded-md">
+          <h3 className="text-lg font-semibold mb-2">{section.title}</h3>
+          <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}>
+            {section.fields.map((field) => (
+              <UniversalFieldRenderer
+                key={field.name}
+                field={field}
+                register={register}
+                setValue={setValue}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+      <Button type="submit">Submit</Button>
+    </form>
+  );
+}
+
+// src/modules/leads/renderer/UniversalFieldRenderer.jsx
+import React from 'react';
+import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import { Switch } from '@/components/ui/switch';
+import { Calendar } from '@/components/ui/calendar';
+import { Label } from '@/components/ui/label';
+
+const FIELD_COMPONENTS = {
+  text: ({ field, register }) => (
+    <div>
+      <Label>{field.label}</Label>
+      <Input {...register(field.name)} placeholder={field.placeholder} />
+    </div>
+  ),
+  email: ({ field, register }) => (
+    <div>
+      <Label>{field.label}</Label>
+      <Input type="email" {...register(field.name)} placeholder={field.placeholder} />
+    </div>
+  ),
+  phone: ({ field, register }) => (
+    <div>
+      <Label>{field.label}</Label>
+      <Input type="tel" {...register(field.name)} placeholder={field.placeholder} />
+    </div>
+  ),
+  number: ({ field, register }) => (
+    <div>
+      <Label>{field.label}</Label>
+      <Input type="number" {...register(field.name)} placeholder={field.placeholder} />
+    </div>
+  ),
+  textarea: ({ field, register }) => (
+    <div>
+      <Label>{field.label}</Label>
+      <Textarea {...register(field.name)} placeholder={field.placeholder} />
+    </div>
+  ),
+  select: ({ field, register }) => (
+    <div>
+      <Label>{field.label}</Label>
+      <Select {...register(field.name)}>
+        {field.options?.map((opt) => (
+          <Select.Option key={opt.value} value={opt.value}>
+            {opt.label}
+          </Select.Option>
+        ))}
+      </Select>
+    </div>
+  ),
+  checkbox: ({ field, register }) => (
+    <div className="flex items-center space-x-2">
+      <Switch {...register(field.name)} />
+      <Label>{field.label}</Label>
+    </div>
+  ),
+  date: ({ field, register }) => (
+    <div>
+      <Label>{field.label}</Label>
+      <Calendar {...register(field.name)} />
+    </div>
+  ),
+  // add more mappings as needed
+};
+
+export default function UniversalFieldRenderer({ field, register, setValue }) {
+  const Component = FIELD_COMPONENTS[field.type];
+  if (!Component) return null;
+  return <Component field={field} register={register} setValue={setValue} />;
+}

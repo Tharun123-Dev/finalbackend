@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from utils.permissions import make_permission, make_any_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from accounts.models import User
+from employees.access import visible_user_ids, user_is_visible
 from .models import LeaveType, LeaveBalance, LeaveRequest
 from .serializers import LeaveTypeSerializer, LeaveBalanceSerializer, LeaveRequestSerializer
 from .utils import (
@@ -569,13 +570,16 @@ class AllLeaveRequestsView(APIView):
         status_filter = request.query_params.get('status')
         emp_id        = request.query_params.get('employee')
 
+        visible_ids = visible_user_ids(request)
         qs = LeaveRequest.objects.select_related(
             'employee', 'employee__profile', 'leave_type', 'approved_by'
-        ).filter(tenant_id=get_tenant_id(request))
+        ).filter(tenant_id=get_tenant_id(request), employee_id__in=visible_ids)
 
         if status_filter:
             qs = qs.filter(status=status_filter)
         if emp_id:
+            if not user_is_visible(request, emp_id):
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
             qs = qs.filter(employee_id=emp_id)
 
         return Response(LeaveRequestSerializer(qs, many=True).data)
@@ -598,6 +602,8 @@ class LeaveActionView(APIView):
             pk=pk,
             tenant_id=get_tenant_id(request),
         )
+        if not user_is_visible(request, leave.employee_id, include_self=False):
+            return Response({'error': 'Employee is outside your approval scope'}, status=403)
 
         if leave.status != 'pending':
             return Response({'error': f'Request is already {leave.status}'}, status=400)
@@ -692,6 +698,8 @@ class LeavePriorUsageView(APIView):
             pk=pk,
             tenant_id=get_tenant_id(request),
         )
+        if not user_is_visible(request, leave.employee_id, include_self=False):
+            return Response({'error': 'Employee is outside your approval scope'}, status=403)
         month      = leave.start_date.month
         year       = leave.start_date.year
         employee   = leave.employee

@@ -9,6 +9,7 @@
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import calendar as cal_mod
+from urllib.parse import unquote
 
 from django.utils import timezone
 
@@ -20,6 +21,8 @@ from django.shortcuts import get_object_or_404
 from utils.permissions import make_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from accounts.models import User
+from employees.access import is_hr_user, is_hrms_admin, is_manager_like, visible_user_ids, user_is_visible
+from employees.models import EmployeeProfile
 from .models import AttendanceRecord, AttendanceRegularization, Holiday, OfficeLocation
 from .serializers import (
     AttendanceRecordSerializer,
@@ -51,6 +54,111 @@ def _today_local() -> date:
 
 def _now_time_local() -> time:
     return _now_local().time().replace(tzinfo=None)
+
+
+def _base_role_from_external(value):
+    role = str(value or '').lower().replace('-', '_').replace(' ', '_')
+    if 'super' in role and 'admin' in role:
+        return 'superadmin'
+    if 'admin' in role:
+        return 'admin'
+    if 'hr' in role or 'human_resource' in role:
+        return 'hr'
+    if 'manager' in role or 'head' in role or 'director' in role:
+        return 'manager'
+    if 'counsel' in role:
+        return 'counselor'
+    return 'employee'
+
+
+def _unique_emp_code(tenant_id, preferred, fallback):
+    base = str(preferred or fallback or 'USR').strip()[:20] or 'USR'
+    candidate = base
+    suffix = 1
+    while EmployeeProfile.objects.filter(tenant_id=tenant_id, emp_code=candidate).exists():
+        suffix_text = f'-{suffix}'
+        candidate = f'{base[:20 - len(suffix_text)]}{suffix_text}'
+        suffix += 1
+    return candidate
+
+
+def _sync_java_attendance_user(request, token):
+    if not (is_hrms_admin(request.user) or is_hr_user(request.user) or is_manager_like(request.user)):
+        return None
+
+    parts = str(token or '').split(':')
+    if len(parts) < 3 or parts[0] != 'java':
+        return None
+
+    java_id = parts[1]
+    email = unquote(parts[2] or '').strip()
+    role = unquote(parts[3]) if len(parts) > 3 else 'employee'
+    first_name = unquote(parts[4]) if len(parts) > 4 else ''
+    last_name = unquote(parts[5]) if len(parts) > 5 else ''
+    emp_code = unquote(parts[6]) if len(parts) > 6 else ''
+    if not email:
+        return None
+
+    tenant_id = get_tenant_id(request)
+    user, created = User.objects.get_or_create(
+        email=email,
+        defaults={
+            'username': email,
+            'first_name': first_name,
+            'last_name': last_name,
+            'tenant_id': tenant_id,
+            'role': _base_role_from_external(role),
+            'is_active': True,
+            'created_by': request.user,
+        },
+    )
+    updates = []
+    if created:
+        user.set_unusable_password()
+        user.save()
+    else:
+        if user.tenant_id != tenant_id:
+            user.tenant_id = tenant_id
+            updates.append('tenant_id')
+        if first_name and user.first_name != first_name:
+            user.first_name = first_name
+            updates.append('first_name')
+        if last_name and user.last_name != last_name:
+            user.last_name = last_name
+            updates.append('last_name')
+        base_role = _base_role_from_external(role)
+        if user.role != base_role:
+            user.role = base_role
+            updates.append('role')
+        if not user.is_active:
+            user.is_active = True
+            updates.append('is_active')
+        if updates:
+            user.save(update_fields=updates)
+
+    if not hasattr(user, 'profile'):
+        EmployeeProfile.objects.create(
+            user=user,
+            tenant_id=tenant_id,
+            emp_code=_unique_emp_code(tenant_id, emp_code, f'JAVA-{java_id}'),
+            designation='other',
+            work_mode='office',
+            joining_date=_today_local(),
+            manager=request.user if request.user.id != user.id else None,
+        )
+
+    return user
+
+
+def _resolve_attendance_employee(request, value, include_self=True):
+    if not value:
+        return request.user
+    value = str(value)
+    if value.startswith('java:'):
+        return _sync_java_attendance_user(request, value)
+    if not user_is_visible(request, value, include_self=include_self):
+        return None
+    return get_object_or_404(User, pk=value, tenant_id=get_tenant_id(request), is_active=True)
 
 
 def _record_tenant_id(record):
@@ -254,12 +362,13 @@ def _calculate_ot_hours(check_in, check_out, record=None):
 def _setting_value(tenant_id, key):
     try:
         from notifications.models import SystemSetting
-        setting = (
-            SystemSetting.objects.filter(tenant_id=str(tenant_id or 'default'), key=key).first()
-            or SystemSetting.objects.filter(tenant_id='default', key=key).first()
-        )
-        if setting:
-            return setting.get_value()
+        tenant_ids = [str(tenant_id or 'default')]
+        if tenant_ids[0] != 'default':
+            tenant_ids.append('default')
+        for candidate_tenant in tenant_ids:
+            setting = SystemSetting.objects.filter(tenant_id=candidate_tenant, key=key).first()
+            if setting and str(setting.value).strip():
+                return setting.get_value()
     except Exception:
         return None
     return None
@@ -538,9 +647,15 @@ class MyAttendanceView(APIView):
         today = _today_local()
         month = int(request.query_params.get('month', today.month))
         year  = int(request.query_params.get('year',  today.year))
+        emp_id = request.query_params.get('employee')
+        target_user = request.user
+        if emp_id:
+            target_user = _resolve_attendance_employee(request, emp_id)
+            if not target_user:
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=status.HTTP_403_FORBIDDEN)
 
         records = AttendanceRecord.objects.filter(
-            employee=request.user, date__year=year, date__month=month,
+            employee=target_user, date__year=year, date__month=month,
         ).order_by('date')
 
         for record in records:
@@ -588,7 +703,7 @@ class MyAttendanceView(APIView):
 
         from leave.models import LeaveRequest
         approved_leaves = LeaveRequest.objects.filter(
-            employee=request.user, status='approved',
+            employee=target_user, status='approved',
             start_date__lte=date(year, month, cal_mod.monthrange(year, month)[1]),
             end_date__gte=date(year, month, 1),
         ).select_related('leave_type')
@@ -776,13 +891,18 @@ class AllAttendanceView(APIView):
         year   = int(request.query_params.get('year',  today.year))
         emp_id = request.query_params.get('employee')
 
+        visible_ids = visible_user_ids(request)
         qs = AttendanceRecord.objects.filter(
             tenant_id=get_tenant_id(request),
             date__year=year, date__month=month,
+            employee_id__in=visible_ids,
         ).select_related('employee', 'employee__profile').order_by('employee__username', 'date')
 
         if emp_id:
-            qs = qs.filter(employee_id=emp_id)
+            target_user = _resolve_attendance_employee(request, emp_id)
+            if not target_user:
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=status.HTTP_403_FORBIDDEN)
+            qs = qs.filter(employee=target_user)
         return Response(AttendanceRecordSerializer(qs, many=True).data)
 
 
@@ -795,8 +915,8 @@ class ApplyRegularizationView(APIView):
         attendance_id      = request.data.get('attendance_id')
         request_date       = request.data.get('date')
         reason             = request.data.get('reason', '')
-        requested_checkin  = request.data.get('requested_checkin')
-        requested_checkout = request.data.get('requested_checkout')
+        requested_checkin  = request.data.get('requested_checkin') or request.data.get('requested_check_in')
+        requested_checkout = request.data.get('requested_checkout') or request.data.get('requested_check_out')
         shift_type         = request.data.get('shift_type', 'day')
 
         if attendance_id:
@@ -889,11 +1009,17 @@ class AllRegularizationsView(APIView):
 
     def get(self, request):
         status_filter = request.query_params.get('status')
+        emp_id = request.query_params.get('employee')
+        visible_ids = visible_user_ids(request)
         qs = AttendanceRegularization.objects.select_related(
             'employee', 'employee__profile', 'attendance',
-        ).filter(tenant_id=get_tenant_id(request)).order_by('-created_at')
+        ).filter(tenant_id=get_tenant_id(request), employee_id__in=visible_ids).order_by('-created_at')
         if status_filter:
             qs = qs.filter(status=status_filter)
+        if emp_id:
+            if not user_is_visible(request, emp_id):
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=status.HTTP_403_FORBIDDEN)
+            qs = qs.filter(employee_id=emp_id)
         return Response(RegularizationSerializer(qs, many=True).data)
 
 
@@ -908,6 +1034,8 @@ class ApproveRegularizationView(APIView):
             pk=pk,
             tenant_id=get_tenant_id(request),
         )
+        if not user_is_visible(request, reg.employee_id, include_self=False):
+            return Response({'error': 'Employee is outside your approval scope'}, status=status.HTTP_403_FORBIDDEN)
         action = request.data.get('action')
         note   = request.data.get('note', '')
 

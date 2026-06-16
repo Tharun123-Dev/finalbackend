@@ -1,0 +1,66 @@
+/* src/pages/integrations/IntegrationsPage.module.css */
+
+/* Background gradient and container */
+.pageContainer {
+  min-height: 100vh;
+  padding: 2rem;
+  background: linear-gradient(135deg, hsl(220, 30%, 12%), hsl(230, 30%, 8%));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: #e5e7eb; /* tailwind gray-200 */
+}
+
+.title {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+}
+
+.connectBtn {
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.2);
+  color: #fff;
+  backdrop-filter: blur(8px);
+  transition: all 0.2s ease;
+}
+
+.connectBtn:hover {
+  background: rgba(255,255,255,0.2);
+  border-color: rgba(255,255,255,0.4);
+}
+
+.cardsGrid {
+  display: grid;
+  gap: 1.5rem;
+  width: 100%;
+  max-width: 1200px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+/* Glassmorphism card override – applied via className prop on IntegrationCard */
+.glassCard {
+  background: rgba(255,255,255,0.08);
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255,255,255,0.12);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 4px 30px rgba(0,0,0,0.5);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glassCard:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+}
+
+/* Ensure button inside card inherits glass styling */
+.glassCard button {
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.2);
+  color: #fff;
+}
+
+.glassCard button:hover {
+  background: rgba(255,255,255,0.2);
+}

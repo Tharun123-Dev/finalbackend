@@ -12,6 +12,7 @@ from django.db import transaction
 from utils.permissions import make_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from accounts.models import User
+from employees.access import visible_user_ids, user_is_visible
 from .models import SalaryStructure, PayrollRun, PayrollEntry, PayrollAdjustment
 from .serializers import (
     SalaryStructureSerializer, PayrollRunSerializer,
@@ -218,11 +219,14 @@ class SalaryStructureListView(APIView):
 
     def get(self, request):
         emp_id = request.query_params.get('employee')
+        visible_ids = visible_user_ids(request)
         qs = SalaryStructure.objects.select_related(
             'employee', 'employee__profile'
-        ).filter(is_active=True, tenant_id=get_tenant_id(request))
+        ).filter(is_active=True, tenant_id=get_tenant_id(request), employee_id__in=visible_ids)
 
         if emp_id:
+            if not user_is_visible(request, emp_id):
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
             qs = qs.filter(employee_id=emp_id)
 
         # Serialize using STORED percentages — shows exactly what was created
@@ -307,6 +311,8 @@ class CreateSalaryStructureView(APIView):
         emp = _resolve_salary_employee(request)
         if not emp:
             return Response({'error': 'Employee not found'}, status=404)
+        if not user_is_visible(request, emp.id):
+            return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
 
         # Use system settings as defaults if not provided — zero hardcodes
         data = {
@@ -545,6 +551,8 @@ class ProcessPayrollRunView(APIView):
 
         with transaction.atomic():
             employee_id = request.data.get('employee') or request.data.get('employee_id')
+            if employee_id and not user_is_visible(request, employee_id):
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
             employee_ids = [employee_id] if employee_id else None
             if employee_id and PayrollEntry.objects.filter(payroll_run=run, employee_id=employee_id, tenant_id=get_tenant_id(request)).exists():
                 return Response({'error': 'Payroll already processed for this employee in this period'}, status=400)
@@ -552,9 +560,10 @@ class ProcessPayrollRunView(APIView):
                 PayrollEntry.objects.filter(
                     payroll_run=run,
                     tenant_id=get_tenant_id(request),
+                    employee_id__in=visible_user_ids(request),
                 ).delete()
 
-            created, skipped = process_payroll_run(run, employee_ids=employee_ids)
+            created, skipped = process_payroll_run(run, employee_ids=employee_ids or visible_user_ids(request))
             if not created and employee_id and not skipped:
                 return Response({'error': 'No available employee found to process'}, status=400)
             if not created and employee_id and skipped:
@@ -599,15 +608,20 @@ class PayrollRunDetailView(APIView):
 
     def get(self, request, pk):
         run     = get_object_or_404(PayrollRun, pk=pk, tenant_id=get_tenant_id(request))
+        visible_ids = visible_user_ids(request)
         entries = PayrollEntry.objects.filter(
             payroll_run=run,
             tenant_id=get_tenant_id(request),
+            employee_id__in=visible_ids,
         ).select_related('employee', 'employee__profile', 'salary_structure')
 
         return Response({
             'run':     PayrollRunSerializer(run).data,
             'entries': PayrollEntrySerializer(entries, many=True).data,
-            'available_employees': _payroll_employee_options(run),
+            'available_employees': [
+                emp for emp in _payroll_employee_options(run)
+                if int(emp.get('id')) in visible_ids
+            ],
         })
 
 
@@ -618,6 +632,8 @@ class UpdatePayrollEntryView(APIView):
 
     def patch(self, request, pk):
         entry = get_object_or_404(PayrollEntry, pk=pk, tenant_id=get_tenant_id(request))
+        if not user_is_visible(request, entry.employee_id):
+            return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
 
         if entry.payroll_run.status == 'locked':
             return Response({'error': 'Cannot edit a locked payroll'}, status=400)
@@ -657,6 +673,8 @@ class AddAdjustmentView(APIView):
 
     def post(self, request, entry_pk):
         entry = get_object_or_404(PayrollEntry, pk=entry_pk, tenant_id=get_tenant_id(request))
+        if not user_is_visible(request, entry.employee_id):
+            return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
 
         if entry.payroll_run.status == 'locked':
             return Response({'error': 'Cannot adjust a locked payroll'}, status=400)
@@ -729,9 +747,11 @@ class PayrollRegisterView(APIView):
 
     def get(self, request, pk):
         run = get_object_or_404(PayrollRun, pk=pk, tenant_id=get_tenant_id(request))
+        visible_ids = visible_user_ids(request)
         entries = PayrollEntry.objects.filter(
             payroll_run=run,
             tenant_id=get_tenant_id(request),
+            employee_id__in=visible_ids,
         ).select_related(
             'employee', 'employee__profile', 'employee__profile__department'
         )
@@ -854,6 +874,8 @@ class EmployeeDeductionHistoryView(APIView):
             emp = User.objects.get(pk=emp_id)
         except User.DoesNotExist:
             return Response({'error': 'Employee not found'}, status=404)
+        if not user_is_visible(request, emp.id):
+            return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
 
         entries = PayrollEntry.objects.filter(
             employee            = emp,
@@ -935,6 +957,7 @@ class AllDeductionSummaryView(APIView):
             payroll_run__month  = month,
             payroll_run__year   = year,
             payroll_run__status = 'locked',
+            employee_id__in=visible_user_ids(request),
         ).select_related(
             'employee', 'employee__profile', 'employee__profile__department',
         ).order_by('employee__first_name')
@@ -1091,16 +1114,19 @@ class DashboardStatsView(APIView):
         from attendance.models import AttendanceRecord
         from leave.models import LeaveRequest
 
-        total_emp  = User.objects.filter(is_active=True).count()
-        total_dept = EmployeeProfile.objects.values('department').distinct().count()
-        today_att  = AttendanceRecord.objects.filter(date=today)
+        visible_ids = visible_user_ids(request)
+        total_emp  = len(visible_ids)
+        total_dept = EmployeeProfile.objects.filter(
+            user_id__in=visible_ids,
+        ).values('department').distinct().count()
+        today_att  = AttendanceRecord.objects.filter(date=today, employee_id__in=visible_ids)
         checked_in = today_att.filter(check_in__isnull=False).count()
-        pending_leaves = LeaveRequest.objects.filter(status='pending').count()
+        pending_leaves = LeaveRequest.objects.filter(employee_id__in=visible_ids, status='pending').count()
 
-        last_run = PayrollRun.objects.order_by('-year', '-month').first()
+        last_run = PayrollRun.objects.filter(tenant_id=get_tenant_id(request)).order_by('-year', '-month').first()
         last_run_data = None
         if last_run:
-            entries = PayrollEntry.objects.filter(payroll_run=last_run)
+            entries = PayrollEntry.objects.filter(payroll_run=last_run, employee_id__in=visible_ids)
             last_run_data = {
                 'month':          last_run.month,
                 'year':           last_run.year,
@@ -1129,7 +1155,7 @@ class DashboardStatsView(APIView):
         from attendance.models import AttendanceRecord
         from leave.models import LeaveRequest
 
-        team_ids   = User.objects.filter(profile__manager=request.user).values_list('id', flat=True)
+        team_ids   = visible_user_ids(request, include_self=False)
         today_att  = AttendanceRecord.objects.filter(date=today, employee_id__in=team_ids)
         checked_in = today_att.filter(check_in__isnull=False).count()
         absent     = len(team_ids) - checked_in

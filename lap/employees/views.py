@@ -8,6 +8,7 @@ from utils.permissions import make_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from accounts.models import User
 from .models import Department, EmployeeProfile
+from .access import employee_profile_visibility_q, role_group, visible_user_queryset
 from .serializers import (
     DepartmentSerializer,
     EmployeeProfileSerializer,
@@ -55,7 +56,9 @@ class EmployeeListView(generics.ListAPIView):
     def get_queryset(self):
         qs = EmployeeProfile.objects.select_related(
             'user', 'department', 'manager'
-        ).filter(user__tenant_id=get_tenant_id(self.request))
+        ).filter(
+            user__tenant_id=get_tenant_id(self.request),
+        ).filter(employee_profile_visibility_q(self.request))
         dept   = self.request.query_params.get('department')
         role   = self.request.query_params.get('role')
         active = self.request.query_params.get('active')
@@ -78,6 +81,56 @@ class EmployeeListView(generics.ListAPIView):
                 user__email__icontains=search
             )
         return qs
+
+
+class HrmsFiltersView(APIView):
+    permission_classes = [make_permission('view_employees')]
+
+    def get(self, request):
+        users = visible_user_queryset(request, include_self=False).select_related('profile', 'custom_role')
+        groups = {
+            'admins': [],
+            'hr': [],
+            'managers': [],
+            'team_leads': [],
+            'employees': [],
+        }
+        roles = {}
+
+        for user in users:
+            profile = getattr(user, 'profile', None)
+            item = {
+                'id': user.id,
+                'user_id': user.id,
+                'name': user.get_full_name() or user.username,
+                'username': user.username,
+                'role': user.get_display_role(),
+                'base_role': user.get_effective_role(),
+                'manager': getattr(profile, 'manager_id', None),
+                'designation': getattr(profile, 'designation', None),
+                'emp_code': getattr(profile, 'emp_code', ''),
+            }
+            group = role_group(user)
+            if group == 'admin':
+                groups['admins'].append(item)
+            elif group == 'hr':
+                groups['hr'].append(item)
+            elif group == 'manager':
+                groups['managers'].append(item)
+            elif group == 'team_lead':
+                groups['team_leads'].append(item)
+            else:
+                groups['employees'].append(item)
+
+            roles[item['role']] = {
+                'label': item['role'],
+                'base_role': item['base_role'],
+            }
+
+        return Response({
+            'roles': list(roles.values()),
+            'groups': groups,
+        })
 
 
 class CreateEmployeeView(APIView):
@@ -111,6 +164,7 @@ class EmployeeDetailView(APIView):
             EmployeeProfile.objects.select_related('user', 'department', 'manager'),
             pk=pk,
             user__tenant_id=get_tenant_id(request),
+            user_id__in=visible_user_queryset(request).values('id'),
         )
         return Response(EmployeeProfileSerializer(profile).data)
 
@@ -119,7 +173,12 @@ class UpdateEmployeeView(APIView):
     permission_classes = [make_permission('edit_employee')]
 
     def patch(self, request, pk):
-        profile = get_object_or_404(EmployeeProfile, pk=pk, user__tenant_id=get_tenant_id(request))
+        profile = get_object_or_404(
+            EmployeeProfile,
+            pk=pk,
+            user__tenant_id=get_tenant_id(request),
+            user_id__in=visible_user_queryset(request).values('id'),
+        )
         user    = profile.user
 
         # Update User fields if provided
@@ -157,7 +216,12 @@ class DeactivateEmployeeView(APIView):
     permission_classes = [make_permission('delete_employee')]
 
     def post(self, request, pk):
-        profile = get_object_or_404(EmployeeProfile, pk=pk, user__tenant_id=get_tenant_id(request))
+        profile = get_object_or_404(
+            EmployeeProfile,
+            pk=pk,
+            user__tenant_id=get_tenant_id(request),
+            user_id__in=visible_user_queryset(request).values('id'),
+        )
         profile.user.is_active = False
         profile.user.save()
         return Response({'message': f'{profile.emp_code} deactivated successfully'})
@@ -168,10 +232,7 @@ class ManagerListView(APIView):
     permission_classes = [IsAuthenticatedUser]
 
     def get(self, request):
-        managers = User.objects.filter(
-            role__in=['manager', 'hr', 'admin'],
-            is_active=True
-        ).filter(
-            tenant_id=get_tenant_id(request)
+        managers = visible_user_queryset(request).filter(
+            role__in=['manager', 'hr', 'admin', 'superadmin'],
         ).values('id', 'username', 'first_name', 'last_name', 'role')
         return Response(list(managers))
