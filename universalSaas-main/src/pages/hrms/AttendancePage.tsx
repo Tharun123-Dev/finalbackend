@@ -1318,6 +1318,12 @@ const employeeLabel = (employee: EmployeeOption) => {
 };
 
 const attendanceValue = (employee: EmployeeOption) => employee.attendance_id || String(employee.user_id);
+const hrmsEmployeeValue = (employee: EmployeeOption) => employee.attendance_id || String(employee.user_id);
+
+const selectedEmployeeRequestValue = (employees: EmployeeOption[], employeeFilter: string) => {
+  const selected = employees.find((emp) => attendanceValue(emp) === employeeFilter);
+  return selected ? hrmsEmployeeValue(selected) : employeeFilter;
+};
 
 const dateInputValue = (value: Date) => {
   const year = value.getFullYear();
@@ -1594,10 +1600,14 @@ export function AttendancePage() {
       setMyRequests(myReqRes.data || []);
 
       // 5. Monthly records
-      const myAttRes = await attendanceService.getMyAttendance(month, year, employeeFilter || undefined);
+      const targetEmployeeForAttendance = selectedEmployeeRequestValue(freshEmployees, employeeFilter);
+      const myAttRes = await attendanceService.getMyAttendance(month, year, targetEmployeeForAttendance || undefined);
       const myAttendancePayload = myAttRes.data as AttendanceRecord[] | { records?: AttendanceRecord[]; policy?: AttendancePolicy };
       const records = Array.isArray(myAttendancePayload) ? myAttendancePayload : myAttendancePayload?.records || [];
-      setMyAttendance(records.map((record) => normalizeAttendanceRecord(record)));
+      setMyAttendance(
+        records
+          .map((record) => normalizeAttendanceRecord(record))
+      );
       setAttendancePolicy(Array.isArray(myAttendancePayload) ? null : myAttendancePayload?.policy || null);
 
       // 6. Approvals (for managers)
@@ -1619,8 +1629,7 @@ export function AttendancePage() {
       ]) || isManagerOrLeadLocal || freshEmployees.some(emp => Number(emp.manager) === Number(user?.id));
 
       if (canApproveLocal) {
-        const selectedEmpForApproval = freshEmployees.find((emp) => attendanceValue(emp) === employeeFilter);
-        const targetUserIdForApproval = selectedEmpForApproval ? String(selectedEmpForApproval.user_id) : employeeFilter;
+        const targetUserIdForApproval = selectedEmployeeRequestValue(freshEmployees, employeeFilter);
 
         const appRes = await attendanceService.getAllRegularizations(approvalsFilter, targetUserIdForApproval || undefined);
         setApprovalsQueue(appRes.data || []);
@@ -1910,8 +1919,7 @@ export function AttendancePage() {
       }
       setSelectedUserDetailsLoading(true);
 
-      const selectedEmp = employees.find((emp) => attendanceValue(emp) === employeeFilter);
-      const targetUserId = selectedEmp ? String(selectedEmp.user_id) : employeeFilter;
+      const targetUserId = selectedEmployeeRequestValue(employees, employeeFilter);
 
       try {
         // 1. Fetch leave requests for subordinate
@@ -1935,7 +1943,8 @@ export function AttendancePage() {
         // 3. Fetch salary list for subordinate
         try {
           const salaryRes = await payrollService.getSalaryList(targetUserId);
-          const salary = salaryRes.data && salaryRes.data.length > 0 ? salaryRes.data[0] : null;
+          const salaryRows = salaryRes.data || [];
+          const salary = salaryRows.length > 0 ? salaryRows[0] : null;
           setSelectedUserSalary(salary);
         } catch (err) {
           console.error('Failed to fetch subordinate salary:', err);
@@ -1945,7 +1954,8 @@ export function AttendancePage() {
         // 4. Fetch payslips for subordinate
         try {
           const payslipsRes = await payrollService.getMyPayslips(targetUserId);
-          setSelectedUserPayslips(payslipsRes.data || payslipsRes || []);
+          const payslipRows = Array.isArray(payslipsRes.data) ? payslipsRes.data : [];
+          setSelectedUserPayslips(payslipRows);
         } catch (err) {
           console.error('Failed to fetch subordinate payslips:', err);
           setSelectedUserPayslips([]);

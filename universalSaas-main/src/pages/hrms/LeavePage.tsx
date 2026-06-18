@@ -37,6 +37,8 @@ const STATUS_BADGES = {
   cancelled: "bg-slate-800/40 text-slate-400 border-slate-700/50",
 };
 
+const employeeFilterValue = (employee: EmployeeOption) => employee.attendance_id || String(employee.user_id);
+
 interface AxiosErrorLike {
   response?: {
     data?: {
@@ -963,14 +965,7 @@ function LeaveApprovals() {
     setLoading(true);
     try {
       const r = await leaveService.getAllRequests(filter || undefined, employeeFilter || undefined);
-      let nextRequests = r.data || [];
-
-      if (filter === 'pending' && !employeeFilter && nextRequests.length === 0) {
-        const myPending = await leaveService.getMyRequests('pending');
-        nextRequests = myPending.data || [];
-      }
-
-      setRequests(nextRequests);
+      setRequests(r.data || []);
     } catch {
       toast.error('Failed to load leave approvals');
     } finally {
@@ -1077,7 +1072,7 @@ function LeaveApprovals() {
         >
           <option value="">All visible employees</option>
           {employees.map((employee) => (
-            <option key={employee.user_id} value={String(employee.user_id)}>
+            <option key={employee.user_id} value={employeeFilterValue(employee)}>
               {employee.display_name || `${employee.first_name} ${employee.last_name}`.trim() || employee.username}
               {employee.emp_code ? ` (${employee.emp_code})` : ''}
             </option>

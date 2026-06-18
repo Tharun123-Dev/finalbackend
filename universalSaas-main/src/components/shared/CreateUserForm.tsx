@@ -16,8 +16,11 @@ interface Role {
 }
 
 interface Supervisor {
-  id: number;
+  id: number | string;
   name: string;
+  role?: string;
+  employeeId?: string;
+  empCode?: string;
 }
 
 interface DynamicFieldInputProps {
@@ -63,6 +66,31 @@ const DynamicFieldInput = ({ field, value, onChange }: DynamicFieldInputProps) =
       />
     </div>
   );
+};
+
+const toApiId = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
+};
+
+const employeeCodeFromSupervisor = (supervisor?: Supervisor) => {
+  if (!supervisor) return '';
+  const explicitCode = supervisor.employeeId || supervisor.empCode;
+  if (explicitCode) return explicitCode;
+  const match = supervisor.name.match(/\(([^)]+)\)/);
+  return match?.[1]?.trim() || '';
+};
+
+const numericIdFromEmployeeCode = (code: string | null) => {
+  const match = String(code || '').match(/(\d+)\s*$/);
+  return match ? Number(match[1]) : null;
+};
+
+const usernameFromSupervisor = (supervisor?: Supervisor) => {
+  if (!supervisor) return null;
+  const beforeCode = supervisor.name.split('(')[0]?.trim();
+  return beforeCode?.split(/\s+/)[0] || null;
 };
 
 export default function CreateUserForm() {
@@ -150,7 +178,7 @@ export default function CreateUserForm() {
     const val = e.target.value;
     setFormData(prev => ({
       ...prev,
-      supervisorUserId: val ? Number(val) : ''
+      supervisorUserId: toApiId(val)
     }));
   };
 
@@ -160,7 +188,31 @@ export default function CreateUserForm() {
     setError(null);
     
     try {
-      const response = await rolesApi.post('/users', formData);
+      const selectedSupervisor = supervisors.find((item) => String(item.id) === String(formData.supervisorUserId));
+      const supervisorEmployeeId = employeeCodeFromSupervisor(selectedSupervisor) || null;
+      const rawSupervisorApiId = formData.supervisorUserId || null;
+      const supervisorCodeApiId = numericIdFromEmployeeCode(supervisorEmployeeId);
+      const supervisorApiId = supervisorCodeApiId || rawSupervisorApiId;
+      const supervisorUsername = usernameFromSupervisor(selectedSupervisor);
+      const payload = {
+        ...formData,
+        supervisorUserId: supervisorApiId,
+        supervisorId: supervisorApiId,
+        reportingToUserId: supervisorApiId,
+        managerId: supervisorApiId,
+        supervisorEmployeeId,
+        rawSupervisorUserId: rawSupervisorApiId,
+        supervisorUsername,
+        profileData: {
+          ...formData.profileData,
+          supervisorUserId: supervisorApiId,
+          supervisorEmployeeId,
+          rawSupervisorUserId: rawSupervisorApiId,
+          supervisorUsername,
+        },
+      };
+
+      const response = await rolesApi.post('/users', payload);
 
       if (response.status === 200 || response.status === 201) {
         setMessage('User successfully created with dynamic profile and hierarchy mapping!');

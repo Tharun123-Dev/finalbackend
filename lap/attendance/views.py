@@ -21,7 +21,7 @@ from django.shortcuts import get_object_or_404
 from utils.permissions import make_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from accounts.models import User
-from employees.access import is_hr_user, is_hrms_admin, is_manager_like, visible_user_ids, user_is_visible
+from employees.access import is_hr_user, is_hrms_admin, is_manager_like, resolve_visible_user, visible_user_ids, user_is_visible
 from employees.models import EmployeeProfile
 from .models import AttendanceRecord, AttendanceRegularization, Holiday, OfficeLocation
 from .serializers import (
@@ -153,12 +153,10 @@ def _sync_java_attendance_user(request, token):
 def _resolve_attendance_employee(request, value, include_self=True):
     if not value:
         return request.user
-    value = str(value)
-    if value.startswith('java:'):
-        return _sync_java_attendance_user(request, value)
-    if not user_is_visible(request, value, include_self=include_self):
+    target = resolve_visible_user(request, value, include_self=include_self)
+    if not target:
         return None
-    return get_object_or_404(User, pk=value, tenant_id=get_tenant_id(request), is_active=True)
+    return target
 
 
 def _record_tenant_id(record):
@@ -1031,14 +1029,10 @@ class AllRegularizationsView(APIView):
         if status_filter:
             qs = qs.filter(status=status_filter)
         if emp_id:
-            resolved_emp_id = emp_id
-            if isinstance(emp_id, str) and emp_id.startswith('java:'):
-                parts = emp_id.split(':')
-                if len(parts) > 1:
-                    resolved_emp_id = parts[1]
-            if not user_is_visible(request, resolved_emp_id):
+            target_user = resolve_visible_user(request, emp_id)
+            if not target_user:
                 return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=status.HTTP_403_FORBIDDEN)
-            qs = qs.filter(employee_id=resolved_emp_id)
+            qs = qs.filter(employee=target_user)
         return Response(RegularizationSerializer(qs, many=True).data)
 
 

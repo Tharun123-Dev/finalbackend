@@ -12,7 +12,7 @@ from django.db import transaction
 from utils.permissions import make_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from accounts.models import User
-from employees.access import visible_user_ids, user_is_visible
+from employees.access import resolve_visible_user, visible_user_ids, user_is_visible
 from .models import SalaryStructure, PayrollRun, PayrollEntry, PayrollAdjustment
 from .serializers import (
     SalaryStructureSerializer, PayrollRunSerializer,
@@ -225,9 +225,10 @@ class SalaryStructureListView(APIView):
         ).filter(is_active=True, tenant_id=get_tenant_id(request), employee_id__in=visible_ids)
 
         if emp_id:
-            if not user_is_visible(request, emp_id):
+            target_user = resolve_visible_user(request, emp_id)
+            if not target_user:
                 return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
-            qs = qs.filter(employee_id=emp_id)
+            qs = qs.filter(employee=target_user)
 
         # Serialize using STORED percentages — shows exactly what was created
         data = [_serialize_structure(s) for s in qs]
@@ -716,9 +717,8 @@ class MyPayslipListView(APIView):
         target_user = request.user
 
         if emp_id:
-            if user_is_visible(request, emp_id, include_self=True):
-                target_user = get_object_or_404(User, pk=emp_id)
-            else:
+            target_user = resolve_visible_user(request, emp_id, include_self=True)
+            if not target_user:
                 return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
 
         entries = PayrollEntry.objects.filter(

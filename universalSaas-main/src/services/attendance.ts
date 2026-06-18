@@ -11,6 +11,9 @@ export interface OfficeLocation {
 
 export interface AttendanceRecord {
   id?: string | null;
+  employee?: string | number;
+  employee_name?: string;
+  emp_code?: string;
   date: string;
   check_in?: string | null;
   check_out?: string | null;

@@ -1063,9 +1063,11 @@ interface Role {
 }
 
 interface Supervisor {
-    id: number;
+    id: number | string;
     name: string;
     role?: string;
+    employeeId?: string;
+    empCode?: string;
 }
 
 interface LookupEntity {
@@ -1141,6 +1143,132 @@ const selectedPermissionIdsFromUser = (user: Record<string, unknown>, permission
         .map((id) => Number(id))
         .filter((id) => Number.isFinite(id) && permissions.some((permission) => permission.id === id));
     return mappedIds;
+};
+
+const readableApiError = (data: unknown, fallback: string) => {
+    if (!data) return fallback;
+    if (typeof data === 'string') return data;
+    if (typeof data !== 'object') return fallback;
+
+    const record = data as Record<string, unknown>;
+    const direct = record.message || record.error || record.detail;
+    if (typeof direct === 'string' && direct.trim()) return direct;
+
+    const fieldMessages = Object.entries(record)
+        .map(([field, value]) => {
+            if (Array.isArray(value)) return `${field}: ${value.join(', ')}`;
+            if (typeof value === 'string') return `${field}: ${value}`;
+            return '';
+        })
+        .filter(Boolean);
+
+    return fieldMessages.length ? fieldMessages.join(' | ') : fallback;
+};
+
+const toApiId = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
+};
+
+const employeeCodeFromSupervisor = (supervisor?: Supervisor) => {
+    if (!supervisor) return null;
+    const explicitCode = supervisor.employeeId || supervisor.empCode;
+    if (explicitCode) return explicitCode;
+    const match = supervisor.name.match(/\(([^)]+)\)/);
+    return match?.[1]?.trim() || null;
+};
+
+const numericIdFromEmployeeCode = (code: string | null) => {
+    const match = String(code || '').match(/(\d+)\s*$/);
+    return match ? Number(match[1]) : null;
+};
+
+const usernameFromSupervisor = (supervisor?: Supervisor) => {
+    if (!supervisor) return null;
+    const beforeCode = supervisor.name.split('(')[0]?.trim();
+    return beforeCode?.split(/\s+/)[0] || null;
+};
+
+const valueFromRecord = (record: Record<string, unknown>, ...keys: string[]) => {
+    for (const key of keys) {
+        const value = record[key];
+        if (value !== undefined && value !== null && value !== '') return String(value).trim();
+    }
+    return '';
+};
+
+const profileValueFromRecord = (record: Record<string, unknown>, ...keys: string[]) => {
+    const profile = record.profileData;
+    if (!profile || typeof profile !== 'object') return '';
+    return valueFromRecord(profile as Record<string, unknown>, ...keys);
+};
+
+const idsEqual = (left: unknown, right: unknown) =>
+    String(left ?? '').trim().toLowerCase() === String(right ?? '').trim().toLowerCase();
+
+const extractUsersList = (data: unknown): Record<string, unknown>[] => {
+    if (Array.isArray(data)) return data.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
+    if (!data || typeof data !== 'object') return [];
+    const record = data as Record<string, unknown>;
+    for (const key of ['users', 'data', 'content', 'items', 'results']) {
+        const value = record[key];
+        if (Array.isArray(value)) return extractUsersList(value);
+        if (value && typeof value === 'object') {
+            const nested = extractUsersList(value);
+            if (nested.length) return nested;
+        }
+    }
+    return [];
+};
+
+const javaUserId = (user: Record<string, unknown>) =>
+    valueFromRecord(user, 'id', 'userId', 'user_id');
+
+const preferredSupervisorSubmitId = (
+    user: Record<string, unknown>,
+    supervisorEmployeeId: string | null,
+    fallback: unknown,
+): string | number | null => {
+    const candidates: unknown[] = [
+        valueFromRecord(user, 'userId', 'user_id', 'id'),
+        numericIdFromEmployeeCode(valueFromRecord(user, 'employeeId', 'emp_code')),
+        numericIdFromEmployeeCode(profileValueFromRecord(user, 'employeeId', 'emp_code')),
+        numericIdFromEmployeeCode(supervisorEmployeeId),
+        fallback,
+    ];
+
+    const selected = candidates.find((candidate) => candidate !== null && candidate !== undefined && candidate !== '');
+    if (typeof selected === 'number' || typeof selected === 'string') return selected;
+    return null;
+};
+
+const findMatchingJavaUser = (
+    users: Record<string, unknown>[],
+    supervisor: Supervisor,
+    rawSupervisorId: unknown,
+    supervisorEmployeeId: string | null,
+    supervisorUsername: string | null,
+) => {
+    const candidates = [
+        rawSupervisorId,
+        supervisor.id,
+        supervisorEmployeeId,
+        supervisorUsername,
+    ].filter((value) => String(value ?? '').trim());
+
+    return users.find((user) => {
+        const userValues = [
+            javaUserId(user),
+            valueFromRecord(user, 'username', 'userName', 'email'),
+            valueFromRecord(user, 'employeeId', 'emp_code'),
+            profileValueFromRecord(user, 'employeeId', 'emp_code'),
+        ].filter(Boolean);
+
+        return candidates.some((candidate) =>
+            userValues.some((userValue) => idsEqual(userValue, candidate))
+        );
+    });
 };
 
 interface UserFormProps {
@@ -1337,27 +1465,96 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+
+        if (!isEdit && password.trim().length < 8) {
+            showToast('error', 'Password must be at least 8 characters.');
+            return;
+        }
+
         setLoading(true);
+
+        const generatedEmployeeId = employeeId || `USR-${Date.now().toString().slice(-6)}`;
+        const selectedEmployeeType = availableEmployeeTypes.find((item) => String(item.id) === employeeTypeId)?.name || '';
+        const selectedDesignation = availableDesignations.find((item) => String(item.id) === designationId)?.name || '';
+        const selectedWorkMode = availableWorkModes.find((item) => String(item.id) === workModeId)?.name || '';
+        const selectedSupervisor = supervisors.find((item) => String(item.id) === supervisorUserId);
+        const supervisorEmployeeId = employeeCodeFromSupervisor(selectedSupervisor);
+        const rawSupervisorApiId = toApiId(supervisorUserId);
+        const supervisorUsername = usernameFromSupervisor(selectedSupervisor);
+        let supervisorApiId = rawSupervisorApiId;
+
+        if (selectedSupervisor && rawSupervisorApiId) {
+            try {
+                const usersRes = await rolesApi.get('/users');
+                const javaUsers = extractUsersList(usersRes.data);
+                const matchedSupervisor = findMatchingJavaUser(
+                    javaUsers,
+                    selectedSupervisor,
+                    rawSupervisorApiId,
+                    supervisorEmployeeId,
+                    supervisorUsername,
+                );
+
+                if (!matchedSupervisor) {
+                    showToast('error', 'Selected supervisor was not found in the user service. Refresh users and try again.');
+                    setLoading(false);
+                    return;
+                }
+
+                supervisorApiId = preferredSupervisorSubmitId(
+                    matchedSupervisor,
+                    supervisorEmployeeId,
+                    rawSupervisorApiId,
+                );
+            } catch {
+                const fallbackId = numericIdFromEmployeeCode(supervisorEmployeeId);
+                supervisorApiId = fallbackId || rawSupervisorApiId;
+            }
+        }
 
         const payload = {
             firstName,
             lastName,
             email,
-            phoneNumber,
+            phoneNumber: phoneNumber || null,
             gender,
-            roleId: selectedRoleId ? parseInt(selectedRoleId, 10) : null,
-            supervisorUserId: supervisorUserId ? parseInt(supervisorUserId, 10) : null,
-            employeeId: employeeId || null,
+            roleId: toApiId(selectedRoleId),
+            supervisorUserId: supervisorApiId,
+            supervisorId: supervisorApiId,
+            reportingToUserId: supervisorApiId,
+            managerId: supervisorApiId,
+            supervisorEmployeeId,
+            rawSupervisorUserId: rawSupervisorApiId,
+            supervisorUsername,
+            employeeId: generatedEmployeeId,
             dateOfBirth: dateOfBirth || null,
             joiningDate: joiningDate || null,
-            employeeTypeId: employeeTypeId ? parseInt(employeeTypeId, 10) : null,
-            designationId: designationId ? parseInt(designationId, 10) : null,
-            workModeId: workModeId ? parseInt(workModeId, 10) : null,
+            employeeTypeId: toApiId(employeeTypeId),
+            designationId: toApiId(designationId),
+            workModeId: toApiId(workModeId),
+            profileData: {
+                ...profileData,
+                emp_code: generatedEmployeeId,
+                employeeId: generatedEmployeeId,
+                joining_date: joiningDate || null,
+                joiningDate: joiningDate || null,
+                date_of_birth: dateOfBirth || null,
+                dateOfBirth: dateOfBirth || null,
+                employee_type: selectedEmployeeType || employeeTypeId || null,
+                employeeType: selectedEmployeeType || employeeTypeId || null,
+                designation: selectedDesignation || designationId || null,
+                work_mode: selectedWorkMode || workModeId || null,
+                workMode: selectedWorkMode || workModeId || null,
+                supervisorUserId: supervisorApiId,
+                supervisorEmployeeId,
+                rawSupervisorUserId: rawSupervisorApiId,
+                supervisorUsername,
+            },
 
             permissionIds: selectedPermissions,
             entityIds: selectedEntityIds,
             departmentIds: selectedDepartmentIds,
-            ...(isEdit ? {} : { password }),
+            ...(isEdit ? {} : { password: password.trim() }),
         };
 
         try {
@@ -1373,17 +1570,10 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
                 setTimeout(() => navigate('/users'), 1000);
             }
         } catch (err: unknown) {
-            const axiosError = err as { response?: { data?: { message?: string } | string }; message?: string };
-            let errorMsg = 'Failed to save user.';
-            if (axiosError.response) {
-                if (typeof axiosError.response.data === 'object' && axiosError.response.data?.message) {
-                    errorMsg = axiosError.response.data.message;
-                } else if (typeof axiosError.response.data === 'string') {
-                    errorMsg = axiosError.response.data;
-                }
-            } else if (axiosError.message) {
-                errorMsg = axiosError.message;
-            }
+            const axiosError = err as { response?: { data?: unknown }; message?: string };
+            const errorMsg = axiosError.response
+                ? readableApiError(axiosError.response.data, 'Failed to save user.')
+                : axiosError.message || 'Failed to save user.';
             showToast('error', errorMsg);
         } finally {
             setLoading(false);

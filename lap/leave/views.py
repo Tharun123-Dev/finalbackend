@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404
 from utils.permissions import make_permission, make_any_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from accounts.models import User
-from employees.access import visible_user_ids, user_is_visible
+from employees.access import resolve_visible_user, visible_user_ids, user_is_visible
 from .models import LeaveType, LeaveBalance, LeaveRequest
 from .serializers import LeaveTypeSerializer, LeaveBalanceSerializer, LeaveRequestSerializer
 from .utils import (
@@ -162,9 +162,8 @@ class MyLeaveBalanceView(APIView):
 
         target_user = request.user
         if emp_id:
-            if user_is_visible(request, emp_id, include_self=True):
-                target_user = get_object_or_404(User, pk=emp_id)
-            else:
+            target_user = resolve_visible_user(request, emp_id, include_self=True)
+            if not target_user:
                 return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
 
         # Auto-init if no balances exist yet for this year
@@ -601,9 +600,10 @@ class AllLeaveRequestsView(APIView):
         if status_filter:
             qs = qs.filter(status=status_filter)
         if emp_id:
-            if not user_is_visible(request, emp_id):
+            target_user = resolve_visible_user(request, emp_id)
+            if not target_user:
                 return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
-            qs = qs.filter(employee_id=emp_id)
+            qs = qs.filter(employee=target_user)
 
         return Response(LeaveRequestSerializer(qs, many=True).data)
 

@@ -1,5 +1,6 @@
 from datetime import date
 import time
+from urllib.parse import unquote
 
 from django.db.models import Q
 
@@ -29,6 +30,8 @@ def normalized_role(user):
         role = user.get_effective_role()
     except Exception:
         role = getattr(user, 'role', '')
+    if not role:
+        role = getattr(user, '_java_base_role', None)
     return str(role or '').lower().replace('-', '_')
 
 
@@ -36,15 +39,19 @@ def is_hrms_admin(user):
     role = normalized_role(user)
     if bool(getattr(user, 'is_superuser', False)) or role in {'superadmin', 'admin', 'hr'}:
         return True
+    if bool(getattr(user, '_java_is_superuser', False)):
+        return True
+    if getattr(user, '_java_base_role', None) in {'superadmin', 'admin', 'hr'}:
+        return True
     return False
 
 
 def is_hr_user(user):
-    return normalized_role(user) in HR_ROLES
+    return normalized_role(user) in HR_ROLES or getattr(user, '_java_base_role', None) in HR_ROLES
 
 
 def is_manager_like(user):
-    if normalized_role(user) in MANAGER_ROLES:
+    if normalized_role(user) in MANAGER_ROLES or getattr(user, '_java_base_role', None) in MANAGER_ROLES:
         return True
     try:
         return user.profile.designation in TEAM_LEAD_DESIGNATIONS
@@ -134,6 +141,104 @@ def _java_base_role(value):
     if 'counsel' in role:
         return 'counselor'
     return 'employee'
+
+
+def _unique_emp_code(tenant_id, preferred, fallback):
+    from employees.models import EmployeeProfile
+
+    base = str(preferred or fallback or 'USR').strip()[:20] or 'USR'
+    candidate = base
+    suffix = 1
+    while EmployeeProfile.objects.filter(tenant_id=tenant_id, emp_code=candidate).exists():
+        suffix_text = f'-{suffix}'
+        candidate = f'{base[:20 - len(suffix_text)]}{suffix_text}'
+        suffix += 1
+    return candidate
+
+
+def sync_java_user_from_selector(request, selector):
+    value = str(selector or '').strip()
+    parts = value.split(':')
+    if len(parts) < 3 or parts[0] != 'java':
+        return None
+
+    from employees.models import EmployeeProfile
+
+    java_id = parts[1].strip()
+    email = unquote(parts[2] or '').strip()
+    if not email:
+        return None
+
+    role = unquote(parts[3]) if len(parts) > 3 else 'employee'
+    first_name = unquote(parts[4]) if len(parts) > 4 else ''
+    last_name = unquote(parts[5]) if len(parts) > 5 else ''
+    emp_code = unquote(parts[6]) if len(parts) > 6 else f'JAVA-{java_id}'
+    tenant_id = get_tenant_id(request)
+    base_role = _java_base_role(role)
+
+    user = User.objects.filter(email__iexact=email).first()
+    created = False
+    if user is None:
+        username = email
+        suffix = 1
+        while User.objects.filter(username=username).exists():
+            suffix += 1
+            username = f'{email}-{suffix}'
+        user = User(
+            username=username,
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            tenant_id=tenant_id,
+            role=base_role,
+            is_active=True,
+            created_by=getattr(request, 'user', None),
+        )
+        user.set_unusable_password()
+        user.save()
+        created = True
+
+    updates = []
+    for field, field_value in (
+        ('tenant_id', tenant_id),
+        ('role', base_role),
+        ('first_name', first_name),
+        ('last_name', last_name),
+    ):
+        if field_value and getattr(user, field) != field_value:
+            setattr(user, field, field_value)
+            updates.append(field)
+    if not user.is_active:
+        user.is_active = True
+        updates.append('is_active')
+    if updates and not created:
+        user.save(update_fields=updates)
+
+    profile, profile_created = EmployeeProfile.objects.get_or_create(
+        user=user,
+        defaults={
+            'tenant_id': tenant_id,
+            'emp_code': _unique_emp_code(tenant_id, emp_code, f'JAVA-{java_id}'),
+            'designation': 'other',
+            'work_mode': 'office',
+            'joining_date': date.today(),
+        },
+    )
+    profile_updates = []
+    if profile.tenant_id != tenant_id:
+        profile.tenant_id = tenant_id
+        profile_updates.append('tenant_id')
+    if emp_code and profile.emp_code != emp_code[:20]:
+        next_code = emp_code[:20]
+        if EmployeeProfile.objects.filter(tenant_id=tenant_id, emp_code=next_code).exclude(pk=profile.pk).exists():
+            next_code = f'JAVA-{java_id}'[:20]
+        if profile.emp_code != next_code:
+            profile.emp_code = next_code
+            profile_updates.append('emp_code')
+    if profile_updates and not profile_created:
+        profile.save(update_fields=profile_updates)
+
+    return user
 
 
 def _java_profile_data(item):
@@ -298,6 +403,22 @@ def _sync_java_reporting_users(request):
         except Exception:
             pass
 
+    # Deactivate active Django users who are not present in the Java backend list
+    try:
+        java_emails = {str(_java_value(ju, 'email', 'username') or '').strip().lower() for ju in java_users}
+        java_emails = {e for e in java_emails if e}
+        if java_emails:
+            active_django_users = User.objects.filter(tenant_id=tenant_id, is_active=True)
+            for django_user in active_django_users:
+                if django_user.is_superuser or django_user.id == request.user.id:
+                    continue
+                email_normalized = str(django_user.email or '').strip().lower()
+                if email_normalized not in java_emails:
+                    django_user.is_active = False
+                    django_user.save(update_fields=['is_active'])
+    except Exception as e:
+        print("Error during user deactivation sync:", e)
+
 
 def visible_user_queryset(request, include_self=True):
     _sync_java_reporting_users(request)
@@ -336,12 +457,50 @@ def visible_user_ids(request, include_self=True):
     return list(visible_user_queryset(request, include_self).values_list('id', flat=True))
 
 
+def resolve_visible_user(request, user_ref, include_self=True):
+    if not user_ref:
+        return None
+
+    tenant_id = get_tenant_id(request)
+    value = str(user_ref).strip()
+    user = None
+    token = getattr(request.user, '_java_token', None)
+
+    if value.startswith('java:'):
+        user = sync_java_user_from_selector(request, value)
+        if user and (user.tenant_id != tenant_id or not user.is_active):
+            user = None
+    else:
+        if value.isdigit() and token:
+            try:
+                from utils.java_bridge import list_users
+                java_users = list_users(token)
+                for ju in java_users:
+                    ju_id = str(ju.get('id') or ju.get('userId') or ju.get('user_id') or '').strip()
+                    if ju_id == value:
+                        email = ju.get('email') or ju.get('username')
+                        if email:
+                            user = User.objects.filter(email__iexact=email, tenant_id=tenant_id, is_active=True).first()
+                            break
+            except Exception as e:
+                print(f"Error resolving numeric Java ID {value}: {e}")
+
+        if not user:
+            try:
+                user = User.objects.filter(pk=value, tenant_id=tenant_id, is_active=True).first()
+            except (ValueError, TypeError):
+                user = None
+
+    if not user:
+        return None
+
+    if visible_user_queryset(request, include_self).filter(pk=user.pk).exists():
+        return user
+    return None
+
+
 def user_is_visible(request, user_id, include_self=True):
-    if isinstance(user_id, str) and user_id.startswith('java:'):
-        parts = user_id.split(':')
-        if len(parts) > 1:
-            user_id = parts[1]
-    return visible_user_queryset(request, include_self).filter(id=user_id).exists()
+    return resolve_visible_user(request, user_id, include_self) is not None
 
 
 def employee_profile_visibility_q(request):

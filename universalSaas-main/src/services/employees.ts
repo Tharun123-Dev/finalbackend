@@ -119,9 +119,15 @@ const isSuperAdminSession = (me: JavaUser | null) => {
   return permissions.includes('*') || (role.includes('super') && role.includes('admin'));
 };
 
+const isHrSession = (me: JavaUser | null) => {
+  const storedRole = localStorage.getItem('role');
+  const role = normalizeRole(me?.roleName || me?.role || storedRole);
+  return role.includes('hr') || role.includes('human_resource');
+};
+
 const scopedJavaUsers = (javaUsers: JavaUser[], me: JavaUser | null) => {
   const activeUsers = javaUsers.filter((user) => user.active !== false && javaId(user));
-  if (isSuperAdminSession(me)) return activeUsers;
+  if (isSuperAdminSession(me) || isHrSession(me)) return activeUsers;
 
   const visible = new Set<string>();
   let frontier = Array.from(currentUserIds(me));
@@ -139,7 +145,11 @@ const scopedJavaUsers = (javaUsers: JavaUser[], me: JavaUser | null) => {
     frontier = next;
   }
 
-  return activeUsers.filter((user) => visible.has(javaId(user)));
+  return activeUsers.filter((user) => {
+    if (!visible.has(javaId(user))) return false;
+    const role = baseRoleFromJavaRole(user.roleName || user.role);
+    return role !== 'superadmin' && role !== 'admin' && role !== 'hr';
+  });
 };
 
 const javaUserToEmployee = (user: JavaUser): EmployeeOption => {
@@ -208,20 +218,37 @@ const mergeEmployees = (lapEmployees: EmployeeOption[], javaUsers: JavaUser[]) =
   return sortEmployees(Array.from(merged.values()));
 };
 
+const dedupeJavaUsers = (javaUsers: JavaUser[]) => {
+  const seen = new Set<string>();
+  return javaUsers.filter((user) => {
+    const id = javaId(user);
+    const email = normalizeId(user.email || user.username).toLowerCase();
+    const key = id ? `id:${id}` : `email:${email}`;
+    if (!key || key === 'email:' || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
 export const employeeService = {
   list: async (params: { role?: string; department?: string; active?: boolean; search?: string } = {}) => {
-    const [lapRes, usersRes, meRes] = await Promise.all([
+    const meRes = await rolesApi.get<JavaUser>('/users/me', { ignore403: true }).catch(() => ({ data: null as JavaUser | null }));
+    const me = meRes.data || null;
+
+    const [lapRes, usersRes] = await Promise.all([
       rolesApi.get<EmployeeOption[]>('/employees/', { params, ignore403: true }).catch(() => ({ data: [] as EmployeeOption[] })),
       rolesApi.get<JavaUser[] | { data?: JavaUser[]; content?: JavaUser[]; results?: JavaUser[] }>('/users', {
         params: { search: params.search || undefined },
         ignore403: true,
       }).catch(() => ({ data: [] as JavaUser[] })),
-      rolesApi.get<JavaUser>('/users/me', { ignore403: true }).catch(() => ({ data: null as JavaUser | null })),
     ]);
+
+    const javaUsers = asArray<JavaUser>(usersRes.data);
+    const javaEmployees = scopedJavaUsers(dedupeJavaUsers(javaUsers), me).map(javaUserToEmployee);
 
     return {
       ...lapRes,
-      data: mergeEmployees(lapRes.data || [], scopedJavaUsers(asArray<JavaUser>(usersRes.data), meRes.data || null)),
+      data: javaEmployees.length ? sortEmployees(javaEmployees) : mergeEmployees(lapRes.data || [], []),
     };
   },
 };
