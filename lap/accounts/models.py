@@ -137,6 +137,7 @@ def _java_permission_candidates(required_code):
             'APPROVE_ATTENDANCE',
             'APPROVE_REGULARIZATION',
             'REGULARIZATION_APPROVE',
+            'ATTENDANCE_APPROVE_REGULARIZE',
         })
 
     return candidates

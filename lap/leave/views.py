@@ -158,17 +158,25 @@ class MyLeaveBalanceView(APIView):
 
     def get(self, request):
         year = int(request.query_params.get('year', date.today().year))
+        emp_id = request.query_params.get('employee') or request.query_params.get('employee_id')
+
+        target_user = request.user
+        if emp_id:
+            if user_is_visible(request, emp_id, include_self=True):
+                target_user = get_object_or_404(User, pk=emp_id)
+            else:
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
 
         # Auto-init if no balances exist yet for this year
-        count = LeaveBalance.objects.filter(employee=request.user, year=year).count()
+        count = LeaveBalance.objects.filter(employee=target_user, year=year).count()
         if count == 0:
-            init_balances_for_employee(request.user, year)
+            init_balances_for_employee(target_user, year)
         else:
             # Always ensure new leave types that were added after employee
             # onboarding have balance rows created automatically.
-            init_balances_for_employee(request.user, year)
+            init_balances_for_employee(target_user, year)
 
-        summary = get_leave_balance_summary(request.user, year)
+        summary = get_leave_balance_summary(target_user, year)
         return Response(summary)
 
 
@@ -564,9 +572,24 @@ class CancelLeaveView(APIView):
 # ── ALL LEAVE REQUESTS (Manager/HR/Admin) ─────────────────────────────────────
 
 class AllLeaveRequestsView(APIView):
-    permission_classes = [make_any_permission('view_all_leave', 'approve_leave')]
+    permission_classes = [IsAuthenticatedUser]
 
     def get(self, request):
+        user = request.user
+        from employees.access import is_manager_like
+        from accounts.models import User as AccountUser
+        has_reports = AccountUser.objects.filter(tenant_id=get_tenant_id(request), profile__manager_id=user.id).exists()
+        has_perm = (
+            user.is_superuser or
+            getattr(user, '_java_is_superuser', False) or
+            user.has_perm_code('view_all_leave') or
+            user.has_perm_code('approve_leave') or
+            is_manager_like(user) or
+            has_reports
+        )
+        if not has_perm:
+            return Response({'error': 'You do not have permission to view leave approvals'}, status=403)
+
         status_filter = request.query_params.get('status')
         emp_id        = request.query_params.get('employee')
 
@@ -588,9 +611,23 @@ class AllLeaveRequestsView(APIView):
 # ── APPROVE / REJECT ──────────────────────────────────────────────────────────
 
 class LeaveActionView(APIView):
-    permission_classes = [make_permission('approve_leave')]
+    permission_classes = [IsAuthenticatedUser]
 
     def post(self, request, pk):
+        user = request.user
+        from employees.access import is_manager_like
+        from accounts.models import User as AccountUser
+        has_reports = AccountUser.objects.filter(tenant_id=get_tenant_id(request), profile__manager_id=user.id).exists()
+        has_perm = (
+            user.is_superuser or
+            getattr(user, '_java_is_superuser', False) or
+            user.has_perm_code('approve_leave') or
+            is_manager_like(user) or
+            has_reports
+        )
+        if not has_perm:
+            return Response({'error': 'You do not have permission to action leave requests'}, status=403)
+
         action = request.data.get('action')
         note   = request.data.get('note', '')
 
@@ -602,8 +639,20 @@ class LeaveActionView(APIView):
             pk=pk,
             tenant_id=get_tenant_id(request),
         )
-        if not user_is_visible(request, leave.employee_id, include_self=False):
-            return Response({'error': 'Employee is outside your approval scope'}, status=403)
+        is_self = (leave.employee_id == user.id)
+        from employees.access import is_hrms_admin
+        if is_self:
+            can_self_approve = (
+                user.is_superuser or
+                getattr(user, '_java_is_superuser', False) or
+                user.has_perm_code('approve_leave') or
+                is_hrms_admin(user)
+            )
+            if not can_self_approve:
+                return Response({'error': 'Employee is outside your approval scope'}, status=403)
+        else:
+            if not user_is_visible(request, leave.employee_id, include_self=False):
+                return Response({'error': 'Employee is outside your approval scope'}, status=403)
 
         if leave.status != 'pending':
             return Response({'error': f'Request is already {leave.status}'}, status=400)
@@ -690,16 +739,43 @@ class LeaveActionView(APIView):
 # ── PRIOR USAGE CHECK ─────────────────────────────────────────────────────────
 
 class LeavePriorUsageView(APIView):
-    permission_classes = [make_permission('approve_leave')]
+    permission_classes = [IsAuthenticatedUser]
 
     def get(self, request, pk):
+        user = request.user
+        from employees.access import is_manager_like
+        from accounts.models import User as AccountUser
+        has_reports = AccountUser.objects.filter(tenant_id=get_tenant_id(request), profile__manager_id=user.id).exists()
+        has_perm = (
+            user.is_superuser or
+            getattr(user, '_java_is_superuser', False) or
+            user.has_perm_code('approve_leave') or
+            is_manager_like(user) or
+            has_reports
+        )
+        if not has_perm:
+            return Response({'error': 'You do not have permission to view leave request details'}, status=403)
+
         leave = get_object_or_404(
             LeaveRequest.objects.select_related('employee', 'leave_type'),
             pk=pk,
             tenant_id=get_tenant_id(request),
         )
-        if not user_is_visible(request, leave.employee_id, include_self=False):
-            return Response({'error': 'Employee is outside your approval scope'}, status=403)
+        is_self = (leave.employee_id == user.id)
+        from employees.access import is_hrms_admin
+        if is_self:
+            can_self_approve = (
+                user.is_superuser or
+                getattr(user, '_java_is_superuser', False) or
+                user.has_perm_code('view_all_leave') or
+                user.has_perm_code('approve_leave') or
+                is_hrms_admin(user)
+            )
+            if not can_self_approve:
+                return Response({'error': 'Employee is outside your approval scope'}, status=403)
+        else:
+            if not user_is_visible(request, leave.employee_id, include_self=False):
+                return Response({'error': 'Employee is outside your approval scope'}, status=403)
         month      = leave.start_date.month
         year       = leave.start_date.year
         employee   = leave.employee

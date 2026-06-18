@@ -63,18 +63,68 @@ class SupervisorOptionsView(APIView):
 
         qs = visible_user_queryset(request, include_self=True).exclude(id=request.query_params.get('excludeUserId') or None)
 
-        if target_level is not None:
-            qs = qs.filter(custom_role__level__lt=target_level) | qs.filter(
-                role__in=['superadmin', 'admin', 'hr', 'manager']
-            )
-        elif target_role in ['superadmin']:
-            qs = qs.none()
-        elif target_role in ['admin', 'hr']:
-            qs = qs.filter(role__in=['superadmin', 'admin'])
-        elif target_role == 'manager':
-            qs = qs.filter(role__in=['superadmin', 'admin', 'hr'])
+        token = getattr(request.user, '_java_token', None)
+        allowed_supervisor_roles = set()
+        allowed_user_emails = set()
+
+        if token and role_id:
+            try:
+                from utils.java_bridge import list_role_hierarchy, list_users
+                hierarchy = list_role_hierarchy(token)
+                for link in hierarchy:
+                    link_role_id = link.get('roleId') or link.get('role_id')
+                    if str(link_role_id) == str(role_id):
+                        parent_role_name = link.get('reportsToRoleName') or link.get('reports_to_role_name')
+                        if parent_role_name:
+                            allowed_supervisor_roles.add(str(parent_role_name).strip().upper())
+                        parent_role_code = link.get('reportsToRoleCode') or link.get('reports_to_role_code')
+                        if parent_role_code:
+                            allowed_supervisor_roles.add(str(parent_role_code).strip().upper())
+                        parent_role_id = link.get('reportsToRoleId') or link.get('reports_to_role_id')
+                        if parent_role_id:
+                            allowed_supervisor_roles.add(str(parent_role_id).strip().upper())
+
+                if allowed_supervisor_roles:
+                    java_users = list_users(token)
+                    for ju in java_users:
+                        ju_role = ju.get('role')
+                        ju_role_name = ''
+                        ju_role_code = ''
+                        ju_role_id = ''
+                        if isinstance(ju_role, dict):
+                            ju_role_name = ju_role.get('name') or ''
+                            ju_role_code = ju_role.get('code') or ''
+                            ju_role_id = ju_role.get('id') or ''
+                        else:
+                            ju_role_name = ju.get('roleName') or ju.get('role') or ''
+                        
+                        matches = (
+                            str(ju_role_name).strip().upper() in allowed_supervisor_roles or
+                            str(ju_role_code).strip().upper() in allowed_supervisor_roles or
+                            str(ju_role_id).strip().upper() in allowed_supervisor_roles
+                        )
+                        if matches:
+                            email = ju.get('email')
+                            if email:
+                                allowed_user_emails.add(email.lower())
+            except Exception as e:
+                print(f"Error fetching dynamic Java role hierarchy: {e}")
+
+        if allowed_user_emails:
+            qs = qs.filter(email__in=allowed_user_emails)
         else:
-            qs = qs.filter(role__in=['superadmin', 'admin', 'hr', 'manager'])
+            if target_level is not None:
+                qs = qs.filter(custom_role__level__lt=target_level) | qs.filter(
+                    role__in=['superadmin', 'admin', 'hr', 'manager']
+                )
+            elif target_role in ['superadmin']:
+                qs = qs.none()
+            elif target_role in ['admin', 'hr']:
+                qs = qs.filter(role__in=['superadmin', 'admin'])
+            elif target_role == 'manager':
+                qs = qs.filter(role__in=['superadmin', 'admin', 'hr'])
+            else:
+                qs = qs.filter(role__in=['superadmin', 'admin', 'hr', 'manager'])
 
         supervisors = []
         seen = set()

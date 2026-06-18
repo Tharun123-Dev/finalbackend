@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from django.conf import settings
 
+_JAVA_BACKEND_ONLINE = True
+_LAST_OFFLINE_CHECK = 0
+_OFFLINE_COOLDOWN = 300  # 5 minutes cooldown to bypass timeouts when Java backend is offline
+
 
 def _post_json(path: str, payload: dict, timeout: float = 2.5) -> dict:
+    global _JAVA_BACKEND_ONLINE, _LAST_OFFLINE_CHECK
     base_url = getattr(settings, 'JAVA_AUTH_BASE_URL', '').rstrip('/')
     if not base_url:
         return {}
+
+    now_ts = time.time()
+    if not _JAVA_BACKEND_ONLINE:
+        if now_ts - _LAST_OFFLINE_CHECK < _OFFLINE_COOLDOWN:
+            return {}  # Fail fast!
+        else:
+            _JAVA_BACKEND_ONLINE = True
 
     data = json.dumps(payload).encode('utf-8')
     request = urllib.request.Request(
@@ -27,7 +40,10 @@ def _post_json(path: str, payload: dict, timeout: float = 2.5) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode('utf-8')
-    except (urllib.error.URLError, TimeoutError, ValueError):
+            _JAVA_BACKEND_ONLINE = True
+    except (urllib.error.URLError, TimeoutError, ValueError, Exception):
+        _JAVA_BACKEND_ONLINE = False
+        _LAST_OFFLINE_CHECK = now_ts
         return {}
 
     try:
@@ -38,9 +54,17 @@ def _post_json(path: str, payload: dict, timeout: float = 2.5) -> dict:
 
 
 def _request_json(base_url: str, path: str, token: str = '', timeout: float = 2.5):
+    global _JAVA_BACKEND_ONLINE, _LAST_OFFLINE_CHECK
     base_url = (base_url or '').rstrip('/')
     if not base_url:
         return None
+
+    now_ts = time.time()
+    if not _JAVA_BACKEND_ONLINE:
+        if now_ts - _LAST_OFFLINE_CHECK < _OFFLINE_COOLDOWN:
+            return None  # Fail fast!
+        else:
+            _JAVA_BACKEND_ONLINE = True
 
     headers = {'Accept': 'application/json'}
     if token:
@@ -55,7 +79,10 @@ def _request_json(base_url: str, path: str, token: str = '', timeout: float = 2.
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode('utf-8')
-    except (urllib.error.URLError, TimeoutError, ValueError):
+            _JAVA_BACKEND_ONLINE = True
+    except (urllib.error.URLError, TimeoutError, ValueError, Exception):
+        _JAVA_BACKEND_ONLINE = False
+        _LAST_OFFLINE_CHECK = now_ts
         return None
 
     try:
@@ -218,3 +245,21 @@ def check_permission(token: str, permission: str) -> bool:
         'permission': permission,
     })
     return data.get('valid') is True and data.get('allowed') is True
+
+
+def list_role_hierarchy(token: str):
+    if not token:
+        return []
+    base_url = _java_api_base_url()
+    candidates = ['api/roles/hierarchy', 'roles/hierarchy']
+    for path in candidates:
+        res = _request_json(base_url, path, token, timeout=4)
+        if isinstance(res, list):
+            return res
+        if isinstance(res, dict):
+            for key in ('hierarchy', 'data', 'content', 'items', 'results'):
+                val = res.get(key)
+                if isinstance(val, list):
+                    return val
+    return []
+

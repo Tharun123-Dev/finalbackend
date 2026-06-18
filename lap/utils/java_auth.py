@@ -305,6 +305,10 @@ class JavaTokenAuthentication(BaseAuthentication):
             )
             user.set_unusable_password()
             user.save()
+            try:
+                _sync_user_profile_and_manager(user, claims, java_profile, request)
+            except Exception:
+                pass
             return user
 
         updates = []
@@ -323,7 +327,161 @@ class JavaTokenAuthentication(BaseAuthentication):
             updates.append('is_active')
         if updates:
             user.save(update_fields=updates)
+        try:
+            _sync_user_profile_and_manager(user, claims, java_profile, request)
+        except Exception:
+            pass
         return user
+
+
+def _sync_user_profile_and_manager(user, claims: dict, java_profile: dict | None, request):
+    from datetime import date
+    from employees.models import EmployeeProfile
+    from accounts.models import User as AccountUser
+
+    java_profile = java_profile or {}
+    claims = claims or {}
+
+    # 1. Gather all profile fields
+    # Resolve emp_code
+    emp_code = (
+        claims.get('emp_code') or claims.get('employeeId') or claims.get('empCode') or claims.get('employeeCode') or
+        java_profile.get('emp_code') or java_profile.get('employeeId') or java_profile.get('empCode') or java_profile.get('employeeCode') or
+        request.headers.get('X-Java-Employee-Id') or
+        f"EMP-{user.id}"
+    )
+    emp_code = str(emp_code).strip()[:20]
+
+    # Resolve designation
+    designation_raw = (
+        claims.get('designation') or java_profile.get('designation') or
+        request.headers.get('X-Java-Designation')
+    )
+
+    # Resolve work_mode
+    work_mode_raw = (
+        claims.get('work_mode') or claims.get('workMode') or
+        java_profile.get('work_mode') or java_profile.get('workMode') or
+        request.headers.get('X-Java-Work-Mode')
+    )
+
+    # Resolve joining_date
+    joining_date_raw = (
+        claims.get('joining_date') or claims.get('joiningDate') or
+        java_profile.get('joining_date') or java_profile.get('joiningDate') or
+        request.headers.get('X-Java-Joining-Date')
+    )
+
+    # Map raw fields to choices
+    allowed_designations = {
+        'software_engineer', 'senior_engineer', 'team_lead', 'project_manager',
+        'hr_executive', 'hr_manager', 'accountant', 'analyst', 'intern', 'other'
+    }
+    designation = 'other'
+    if designation_raw:
+        norm_desig = str(designation_raw).lower().replace('-', '_').replace(' ', '_')
+        if norm_desig in allowed_designations:
+            designation = norm_desig
+
+    work_mode = 'office'
+    if work_mode_raw:
+        norm_wm = str(work_mode_raw).lower().replace('-', '_').replace(' ', '_')
+        if norm_wm in {'office', 'work_from_home'}:
+            work_mode = norm_wm
+
+    joining_date = date.today()
+    if joining_date_raw:
+        try:
+            if isinstance(joining_date_raw, str):
+                joining_date = date.fromisoformat(joining_date_raw.split('T')[0])
+        except Exception:
+            pass
+
+    # Get or create EmployeeProfile
+    profile, created = EmployeeProfile.objects.get_or_create(
+        user=user,
+        defaults={
+            'tenant_id': user.tenant_id,
+            'emp_code': emp_code,
+            'designation': designation,
+            'work_mode': work_mode,
+            'joining_date': joining_date,
+        }
+    )
+
+    profile_updates = []
+    if profile.tenant_id != user.tenant_id:
+        profile.tenant_id = user.tenant_id
+        profile_updates.append('tenant_id')
+    if emp_code and profile.emp_code != emp_code:
+        if not EmployeeProfile.objects.filter(tenant_id=user.tenant_id, emp_code=emp_code).exclude(pk=profile.pk).exists():
+            profile.emp_code = emp_code
+            profile_updates.append('emp_code')
+
+    # 2. Try to find the manager/supervisor user in Django
+    manager_candidates = []
+
+    for source in (claims, java_profile):
+        for key in ('supervisor', 'manager', 'reportingTo'):
+            val = source.get(key)
+            if isinstance(val, dict):
+                for subkey in ('email', 'username', 'id', 'userId', 'user_id'):
+                    if val.get(subkey):
+                        manager_candidates.append(str(val.get(subkey)).strip())
+            elif val:
+                manager_candidates.append(str(val).strip())
+
+    for source in (claims, java_profile):
+        for key in (
+            'supervisorEmail', 'managerEmail', 'reportingToEmail', 'supervisor_email', 'manager_email',
+            'supervisorUsername', 'managerUsername', 'reportingToUsername', 'supervisor_username', 'manager_username',
+            'supervisorUserId', 'supervisor_id', 'managerId', 'manager_id', 'reportingToUserId',
+        ):
+            val = source.get(key)
+            if val:
+                manager_candidates.append(str(val).strip())
+
+    for header in ('X-Java-Supervisor-Id', 'X-Java-Supervisor-Email', 'X-Java-Supervisor-Username'):
+        val = request.headers.get(header)
+        if val:
+            manager_candidates.append(str(val).strip())
+
+    manager_user = None
+    for cand in manager_candidates:
+        if not cand:
+            continue
+        if '@' in cand:
+            mgr = AccountUser.objects.filter(email__iexact=cand, is_active=True).first()
+            if mgr:
+                manager_user = mgr
+                break
+        mgr = AccountUser.objects.filter(username__iexact=cand, is_active=True).first()
+        if mgr:
+            manager_user = mgr
+            break
+        if cand.isdigit():
+            mgr = AccountUser.objects.filter(id=int(cand), is_active=True).first()
+            if mgr:
+                manager_user = mgr
+                break
+        java_email = f'java-user-{cand}@lap.local'
+        mgr = AccountUser.objects.filter(email__iexact=java_email, is_active=True).first()
+        if mgr:
+            manager_user = mgr
+            break
+        mgr_profile = EmployeeProfile.objects.filter(tenant_id=user.tenant_id, emp_code__iexact=cand).first()
+        if mgr_profile:
+            manager_user = mgr_profile.user
+            break
+
+    if manager_user and manager_user.id != user.id:
+        if profile.manager_id != manager_user.id:
+            profile.manager = manager_user
+            profile_updates.append('manager')
+
+    if profile_updates:
+        profile.save(update_fields=profile_updates)
+
 
 
 def _resolve_tenant_id(claims: dict, request, java_profile: dict | None = None) -> str:

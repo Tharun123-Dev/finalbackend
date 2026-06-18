@@ -1,4 +1,5 @@
 from datetime import date
+import time
 
 from django.db.models import Q
 
@@ -19,6 +20,9 @@ BASE_ROLE_LEVELS = {
     'employee': 50,
 }
 
+_LAST_JAVA_SYNC_ATTEMPT = 0
+_JAVA_SYNC_COOLDOWN = 180  # 3 minutes cooldown to prevent slow network timeouts
+
 
 def normalized_role(user):
     try:
@@ -29,7 +33,10 @@ def normalized_role(user):
 
 
 def is_hrms_admin(user):
-    return bool(getattr(user, 'is_superuser', False)) or normalized_role(user) in ADMIN_ROLES
+    role = normalized_role(user)
+    if bool(getattr(user, 'is_superuser', False)) or role in {'superadmin', 'admin', 'hr'}:
+        return True
+    return False
 
 
 def is_hr_user(user):
@@ -157,6 +164,8 @@ def _safe_work_mode(value):
 
 
 def _sync_java_reporting_users(request):
+    global _LAST_JAVA_SYNC_ATTEMPT
+
     token = getattr(request.user, '_java_token', None)
     current_java_id = str(getattr(request.user, '_java_user_id', '') or '').strip()
     if not token or not current_java_id:
@@ -166,6 +175,11 @@ def _sync_java_reporting_users(request):
     if getattr(request, cache_key, False):
         return
     setattr(request, cache_key, True)
+
+    now_ts = time.time()
+    if now_ts - _LAST_JAVA_SYNC_ATTEMPT < _JAVA_SYNC_COOLDOWN:
+        return
+    _LAST_JAVA_SYNC_ATTEMPT = now_ts
 
     try:
         from utils.java_bridge import list_users
@@ -298,15 +312,17 @@ def visible_user_queryset(request, include_self=True):
             return qs.order_by('first_name', 'last_name', 'username')
         return qs.exclude(id=user.id).order_by('first_name', 'last_name', 'username')
 
-    if is_manager_like(user):
+    has_reports = qs.filter(profile__manager_id=user.id).exists()
+    if is_manager_like(user) or has_reports:
         seen = set()
-        frontier = [user.id]
-        while frontier:
-            children = list(qs.filter(profile__manager_id__in=frontier).values_list('id', flat=True))
-            children += list(qs.filter(created_by_id__in=frontier).values_list('id', flat=True))
-            next_frontier = [child for child in children if child not in seen and child != user.id]
-            seen.update(next_frontier)
-            frontier = next_frontier
+        queue = [user.id]
+        while queue:
+            curr_id = queue.pop(0)
+            direct_ids = list(qs.filter(profile__manager_id=curr_id).values_list('id', flat=True))
+            for d_id in direct_ids:
+                if d_id not in seen:
+                    seen.add(d_id)
+                    queue.append(d_id)
         if include_self:
             seen.add(user.id)
         return qs.filter(id__in=seen).order_by('first_name', 'last_name', 'username')
@@ -321,6 +337,10 @@ def visible_user_ids(request, include_self=True):
 
 
 def user_is_visible(request, user_id, include_self=True):
+    if isinstance(user_id, str) and user_id.startswith('java:'):
+        parts = user_id.split(':')
+        if len(parts) > 1:
+            user_id = parts[1]
     return visible_user_queryset(request, include_self).filter(id=user_id).exists()
 
 

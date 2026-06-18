@@ -1065,6 +1065,7 @@ interface Role {
 interface Supervisor {
     id: number;
     name: string;
+    role?: string;
 }
 
 interface LookupEntity {
@@ -1686,7 +1687,7 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
                                         <option value="">No supervisor (reporting endpoint)</option>
                                         {supervisors.map((s) => (
                                             <option key={s.id} value={s.id}>
-                                                {s.name}
+                                                {s.name} {s.role ? `[${s.role}]` : ''}
                                             </option>
                                         ))}
                                     </select>

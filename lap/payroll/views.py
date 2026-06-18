@@ -712,8 +712,17 @@ class MyPayslipListView(APIView):
     permission_classes = [make_permission('view_payslip')]
 
     def get(self, request):
+        emp_id = request.query_params.get('employee') or request.query_params.get('employee_id')
+        target_user = request.user
+
+        if emp_id:
+            if user_is_visible(request, emp_id, include_self=True):
+                target_user = get_object_or_404(User, pk=emp_id)
+            else:
+                return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=403)
+
         entries = PayrollEntry.objects.filter(
-            employee=request.user,
+            employee=target_user,
             tenant_id=get_tenant_id(request),
             payroll_run__status='locked',
         ).select_related('payroll_run', 'salary_structure').order_by(

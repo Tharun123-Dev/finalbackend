@@ -80,6 +80,7 @@ rolesApi.interceptors.request.use(
     // Determine the base URL dynamically based on the URL path
     let isLapRoute = 
       url.startsWith('/attendance') ||
+      url.startsWith('/users/supervisors') ||
       url.startsWith('/leave') ||
       url.startsWith('/payroll') ||
       url.startsWith('/reports') ||
@@ -142,4 +143,3 @@ rolesApi.interceptors.response.use(
 );
 
 export default rolesApi;
-

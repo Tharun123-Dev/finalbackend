@@ -19,6 +19,7 @@ export interface EmployeeOption {
   work_mode?: string | null;
   manager?: number | null;
   manager_name?: string | null;
+  joining_date?: string | null;
 }
 
 const sortEmployees = (employees: EmployeeOption[]) =>
@@ -77,7 +78,7 @@ const baseRoleFromJavaRole = (value?: string | null) => {
   if (role.includes('admin')) return 'admin';
   if (role.includes('hr') || role.includes('human_resource')) return 'hr';
   if (role.includes('manager') || role.includes('head') || role.includes('director')) return 'manager';
-  if (role.includes('lead') || role.includes('leader')) return 'manager';
+  if (role.includes('lead') || role.includes('leader') || role.includes('tl')) return 'tl';
   if (role.includes('counsel')) return 'counselor';
   return 'employee';
 };
@@ -179,6 +180,7 @@ const javaUserToEmployee = (user: JavaUser): EmployeeOption => {
     work_mode: profile.work_mode ? String(profile.work_mode) : null,
     manager: Number(javaSupervisorId(user)) || null,
     manager_name: user.supervisorName || user.managerName || null,
+    joining_date: String(profile.joining_date || profile.joiningDate || ''),
   };
 };
 
@@ -200,6 +202,7 @@ const mergeEmployees = (lapEmployees: EmployeeOption[], javaUsers: JavaUser[]) =
       manager_name: existing?.manager_name ?? employee.manager_name,
       role: existing?.role || employee.role,
       base_role: existing?.base_role || employee.base_role,
+      joining_date: existing?.joining_date || employee.joining_date,
     });
   });
   return sortEmployees(Array.from(merged.values()));

@@ -76,6 +76,7 @@ export interface RegularizationRequest {
 
 const normalizeRegularization = (request: RegularizationRequest): RegularizationRequest => ({
   ...request,
+  employee_id: String(request.employee_id || (request as any).employee || ''),
   requested_check_in: request.requested_check_in ?? request.requested_checkin ?? null,
   requested_check_out: request.requested_check_out ?? request.requested_checkout ?? null,
   manager_note: request.manager_note ?? request.approver_note ?? '',

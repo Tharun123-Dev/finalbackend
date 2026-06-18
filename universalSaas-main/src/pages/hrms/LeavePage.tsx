@@ -1842,11 +1842,25 @@ function HolidayRow({ h, onEdit, onDelete, deletingId, isUpcoming = false }: Hol
 // --- CONTAINER PAGE: LeavePage ---
 export function LeavePage() {
   const [activeTab, setActiveTab] = useState('balance');
-  const { role, hasAnyPermission } = usePermissions();
+  const { role, hasAnyPermission, user } = usePermissions();
+
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
+  useEffect(() => {
+    employeeService.list({ active: true }).then(r => setEmployees(r.data || [])).catch(() => {});
+  }, []);
 
   // Admin tabs are visible to HR/Admin roles
   const isAdminOrHR = role === 'ADMIN' || role === 'SUPER_ADMIN' || role === 'HR';
-  const canManageApprovals = isAdminOrHR || hasAnyPermission(['view_all_leave', 'approve_leave']);
+  const currentUserOption = employees.find(emp => Number(emp.user_id) === Number(user?.id));
+  const isManagerOrLead = role === 'MANAGER' ||
+    isAdminOrHR ||
+    String(currentUserOption?.designation || '').toLowerCase().includes('lead') ||
+    String(currentUserOption?.designation || '').toLowerCase().includes('manager') ||
+    employees.some(emp => Number(emp.manager) === Number(user?.id));
+
+  const canManageApprovals = isAdminOrHR || hasAnyPermission([
+    'view_all_leave', 'approve_leave', 'leave_approve', 'leave_view', 'hrms_leave_approve', 'hrms_leave_view'
+  ]) || isManagerOrLead;
   const canConfigureLeave = isAdminOrHR || hasAnyPermission(['configure_leave']);
 
   const tabs = [

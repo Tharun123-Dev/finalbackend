@@ -1005,9 +1005,23 @@ class MyRegularizationsView(APIView):
 # ── ALL REGULARISATIONS ───────────────────────────────────────────────────────
 
 class AllRegularizationsView(APIView):
-    permission_classes = [make_permission('approve_regularize')]
+    permission_classes = [IsAuthenticatedUser]
 
     def get(self, request):
+        user = request.user
+        from employees.access import is_manager_like
+        from accounts.models import User as AccountUser
+        has_reports = AccountUser.objects.filter(tenant_id=get_tenant_id(request), profile__manager_id=user.id).exists()
+        has_perm = (
+            user.is_superuser or
+            getattr(user, '_java_is_superuser', False) or
+            user.has_perm_code('approve_regularize') or
+            is_manager_like(user) or
+            has_reports
+        )
+        if not has_perm:
+            return Response({'error': 'You do not have permission to view regularization approvals'}, status=status.HTTP_403_FORBIDDEN)
+
         status_filter = request.query_params.get('status')
         emp_id = request.query_params.get('employee')
         visible_ids = visible_user_ids(request)
@@ -1017,25 +1031,56 @@ class AllRegularizationsView(APIView):
         if status_filter:
             qs = qs.filter(status=status_filter)
         if emp_id:
-            if not user_is_visible(request, emp_id):
+            resolved_emp_id = emp_id
+            if isinstance(emp_id, str) and emp_id.startswith('java:'):
+                parts = emp_id.split(':')
+                if len(parts) > 1:
+                    resolved_emp_id = parts[1]
+            if not user_is_visible(request, resolved_emp_id):
                 return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=status.HTTP_403_FORBIDDEN)
-            qs = qs.filter(employee_id=emp_id)
+            qs = qs.filter(employee_id=resolved_emp_id)
         return Response(RegularizationSerializer(qs, many=True).data)
 
 
 # ── APPROVE / REJECT REGULARISATION ──────────────────────────────────────────
 
 class ApproveRegularizationView(APIView):
-    permission_classes = [make_permission('approve_regularize')]
+    permission_classes = [IsAuthenticatedUser]
 
     def post(self, request, pk):
+        user = request.user
+        from employees.access import is_manager_like
+        from accounts.models import User as AccountUser
+        has_reports = AccountUser.objects.filter(tenant_id=get_tenant_id(request), profile__manager_id=user.id).exists()
+        has_perm = (
+            user.is_superuser or
+            getattr(user, '_java_is_superuser', False) or
+            user.has_perm_code('approve_regularize') or
+            is_manager_like(user) or
+            has_reports
+        )
+        if not has_perm:
+            return Response({'error': 'You do not have permission to action regularization requests'}, status=status.HTTP_403_FORBIDDEN)
+
         reg    = get_object_or_404(
             AttendanceRegularization,
             pk=pk,
             tenant_id=get_tenant_id(request),
         )
-        if not user_is_visible(request, reg.employee_id, include_self=False):
-            return Response({'error': 'Employee is outside your approval scope'}, status=status.HTTP_403_FORBIDDEN)
+        is_self = (reg.employee_id == user.id)
+        from employees.access import is_hrms_admin
+        if is_self:
+            can_self_approve = (
+                user.is_superuser or
+                getattr(user, '_java_is_superuser', False) or
+                user.has_perm_code('approve_regularize') or
+                is_hrms_admin(user)
+            )
+            if not can_self_approve:
+                return Response({'error': 'Employee is outside your approval scope'}, status=status.HTTP_403_FORBIDDEN)
+        else:
+            if not user_is_visible(request, reg.employee_id, include_self=False):
+                return Response({'error': 'Employee is outside your approval scope'}, status=status.HTTP_403_FORBIDDEN)
         action = request.data.get('action')
         note   = request.data.get('note', '')
 
