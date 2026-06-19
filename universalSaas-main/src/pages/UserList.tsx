@@ -17,7 +17,8 @@ interface User {
   active: boolean;
   roleId?: number;
   roleName?: string;
-  supervisorUserId?: number;
+  supervisorUserId?: number | string;
+  managerId?: number | string;
   supervisorName?: string;
   managerName?: string;
   employeeId?: string;
@@ -25,9 +26,9 @@ interface User {
   profileData?: Record<string, unknown>;
 }
 
-const reportsToName = (user: User) => {
+const reportsToName = (user: User, users: User[] = []) => {
   const profile = user.profileData || {};
-  return (
+  const directName = (
     user.supervisorName ||
     user.managerName ||
     profile.reporting_supervisor_name ||
@@ -36,6 +37,17 @@ const reportsToName = (user: User) => {
     profile.managerName ||
     ''
   );
+  if (directName) return String(directName);
+
+  const supervisorId =
+    user.supervisorUserId ||
+    user.managerId ||
+    profile.reporting_supervisor_id ||
+    profile.reportingSupervisorId;
+  if (!supervisorId) return '';
+
+  const supervisor = users.find((item) => String(item.id) === String(supervisorId));
+  return supervisor ? `${supervisor.firstName || ''} ${supervisor.lastName || ''}`.trim() : '';
 };
 
 export default function UserList() {
@@ -258,7 +270,7 @@ export default function UserList() {
 
                     {/* Reports To */}
                     <td className="py-3.5 px-4 text-muted-foreground text-xs">
-                      {reportsToName(user) || <span className="text-muted-foreground">—</span>}
+                      {reportsToName(user, users) || <span className="text-muted-foreground">—</span>}
                     </td>
 
                     {/* Action buttons */}

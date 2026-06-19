@@ -50,6 +50,19 @@ def _classify_role_name(value):
     return 'employee'
 
 
+def _allowed_supervisor_groups(target_role):
+    role_group = _classify_role_name(target_role)
+    if role_group == 'superadmin':
+        return set()
+    if role_group == 'admin':
+        return {'superadmin'}
+    if role_group == 'manager':
+        return {'superadmin', 'admin'}
+    if role_group in {'hr', 'team_lead'}:
+        return {'superadmin', 'admin', 'manager', 'hr'}
+    return {'superadmin', 'admin', 'hr', 'manager', 'team_lead'}
+
+
 def _java_role_label(item):
     role = item.get('role') if isinstance(item, dict) else None
     if isinstance(role, dict):
@@ -267,13 +280,8 @@ class SupervisorOptionsView(APIView):
                 str(item.get('roleId') or item.get('role_id') or '').strip().upper(),
             }
 
-        # Classify the target role
-        classified_target = _classify_role_name(target_role)
-
-        # Supervisors are account holders above normal employees.
-        allowed_groups = {'superadmin', 'admin', 'hr', 'manager', 'team_lead'}
-        if classified_target == 'superadmin':
-            allowed_groups = set()
+        # Supervisors are constrained by the selected user's target role.
+        allowed_groups = _allowed_supervisor_groups(target_role)
 
         def java_name(item):
             return _java_display_name(item)

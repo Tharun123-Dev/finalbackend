@@ -68,8 +68,19 @@ const normalizeRole = (value?: string | null) => String(value || '').toLowerCase
 
 const javaId = (user: JavaUser) => normalizeId(user.id ?? user.userId ?? user.user_id);
 
-const javaSupervisorId = (user: JavaUser) =>
-  normalizeId(user.supervisorUserId ?? user.supervisor_user_id ?? user.reportingToUserId ?? user.managerId);
+const javaSupervisorId = (user: JavaUser) => {
+  const profile = user.profileData || {};
+  return normalizeId(
+    user.supervisorUserId ??
+    user.supervisor_user_id ??
+    user.reportingToUserId ??
+    user.managerId ??
+    profile.reporting_supervisor_id ??
+    profile.reportingSupervisorId ??
+    profile.supervisorUserId ??
+    profile.managerId
+  );
+};
 
 const baseRoleFromJavaRole = (value?: string | null) => {
   const role = normalizeRole(value);
@@ -189,7 +200,7 @@ const javaUserToEmployee = (user: JavaUser): EmployeeOption => {
     designation: profile.designation ? String(profile.designation) : null,
     work_mode: profile.work_mode ? String(profile.work_mode) : null,
     manager: Number(javaSupervisorId(user)) || null,
-    manager_name: user.supervisorName || user.managerName || null,
+    manager_name: user.supervisorName || user.managerName || String(profile.reporting_supervisor_name || profile.reportingSupervisorName || '') || null,
     joining_date: String(profile.joining_date || profile.joiningDate || ''),
   };
 };

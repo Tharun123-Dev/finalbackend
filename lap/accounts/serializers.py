@@ -88,21 +88,20 @@ def save_user_profile(user, data, tenant_id=None):
     )
     if supervisor_ref:
         manager_user = None
-        # 1. Search by Django User PK
-        if str(supervisor_ref).isdigit():
+        # 1. Prefer Java/user-code ids because the reporting dropdown returns those ids.
+        all_users = User.objects.filter(tenant_id=tenant_id).select_related('profile')
+        for u in all_users:
+            u_profile = getattr(u, 'profile', None)
+            if u_profile and u_profile.emp_code:
+                import re
+                match = re.search(r'(\d+)\s*$', str(u_profile.emp_code))
+                if match and str(int(match.group(1))) == str(supervisor_ref):
+                    manager_user = u
+                    break
+
+        # 2. Fallback to Django User PK for local-only selectors.
+        if not manager_user and str(supervisor_ref).isdigit():
             manager_user = User.objects.filter(pk=int(supervisor_ref), tenant_id=tenant_id).first()
-        
-        # 2. Search by matching Java ID (digits in employee code)
-        if not manager_user:
-            all_users = User.objects.filter(tenant_id=tenant_id).select_related('profile')
-            for u in all_users:
-                u_profile = getattr(u, 'profile', None)
-                if u_profile and u_profile.emp_code:
-                    import re
-                    match = re.search(r'(\d+)\s*$', str(u_profile.emp_code))
-                    if match and str(int(match.group(1))) == str(supervisor_ref):
-                        manager_user = u
-                        break
         
         # 3. Fallback search by email/username/emp_code
         if not manager_user:

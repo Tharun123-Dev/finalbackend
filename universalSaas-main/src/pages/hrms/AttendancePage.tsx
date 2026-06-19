@@ -1601,7 +1601,13 @@ export function AttendancePage() {
 
       // 5. Monthly records
       const targetEmployeeForAttendance = selectedEmployeeRequestValue(freshEmployees, employeeFilter);
-      const myAttRes = await attendanceService.getMyAttendance(month, year, targetEmployeeForAttendance || undefined);
+      const myAttRes = await attendanceService.getMyAttendance(
+        month,
+        year,
+        targetEmployeeForAttendance || undefined,
+        dateFrom || undefined,
+        dateTo || undefined
+      );
       const myAttendancePayload = myAttRes.data as AttendanceRecord[] | { records?: AttendanceRecord[]; policy?: AttendancePolicy };
       const records = Array.isArray(myAttendancePayload) ? myAttendancePayload : myAttendancePayload?.records || [];
       setMyAttendance(
@@ -1810,6 +1816,18 @@ export function AttendancePage() {
     return map;
   }, [dateFrom, dateTo, myAttendance, statusFilter]);
 
+  const filteredAttendanceRecords = useMemo(() => (
+    myAttendance.filter((rec) => {
+      if (dateFrom && rec.date < dateFrom) return false;
+      if (dateTo && rec.date > dateTo) return false;
+      if (statusFilter === 'missing') {
+        return rec.pending_reason === 'missing_attendance' || rec.pending_reason === 'missing_checkout' || Boolean(rec.check_in && !rec.check_out);
+      }
+      if (statusFilter) return rec.status === statusFilter;
+      return true;
+    })
+  ), [dateFrom, dateTo, myAttendance, statusFilter]);
+
   const weekendDays = useMemo(
     () => new Set((attendancePolicy?.weekend_days || ['saturday', 'sunday']).map((day) => day.toLowerCase())),
     [attendancePolicy]
@@ -1859,6 +1877,10 @@ export function AttendancePage() {
   };
 
   const applyFilters = () => {
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      toast.error('From date cannot be after To date');
+      return;
+    }
     if (dateFrom) {
       const parsed = new Date(`${dateFrom}T00:00:00`);
       if (!Number.isNaN(parsed.getTime())) {
@@ -1905,7 +1927,7 @@ export function AttendancePage() {
 
   useEffect(() => {
     loadData();
-  }, [month, year, approvalsFilter, employeeFilter, searchFilter]);
+  }, [month, year, approvalsFilter, employeeFilter, searchFilter, dateFrom, dateTo]);
 
   // Fetch detailed info for filtered employee
   useEffect(() => {
@@ -1924,7 +1946,7 @@ export function AttendancePage() {
       try {
         // 1. Fetch leave requests for subordinate
         try {
-          const leavesRes = await leaveService.getAllRequests(undefined, targetUserId);
+          const leavesRes = await leaveService.getAllRequests(undefined, targetUserId, dateFrom || undefined, dateTo || undefined);
           setSelectedUserLeaves(leavesRes.data || []);
         } catch (err) {
           console.error('Failed to fetch subordinate leaves:', err);
@@ -1953,7 +1975,7 @@ export function AttendancePage() {
 
         // 4. Fetch payslips for subordinate
         try {
-          const payslipsRes = await payrollService.getMyPayslips(targetUserId);
+          const payslipsRes = await payrollService.getMyPayslips(targetUserId, dateFrom || undefined, dateTo || undefined);
           const payslipRows = Array.isArray(payslipsRes.data) ? payslipsRes.data : [];
           setSelectedUserPayslips(payslipRows);
         } catch (err) {
@@ -1969,7 +1991,7 @@ export function AttendancePage() {
     };
 
     fetchSubordinateDetails();
-  }, [employeeFilter, year, employees]);
+  }, [employeeFilter, year, employees, dateFrom, dateTo]);
 
   const downloadEmployeeReport = () => {
     if (!selectedEmployee) return;
@@ -2426,14 +2448,14 @@ export function AttendancePage() {
                               </tr>
                             </thead>
                             <tbody>
-                              {myAttendance.length === 0 ? (
+                              {filteredAttendanceRecords.length === 0 ? (
                                 <tr>
                                   <td colSpan={7} className="py-6 text-center text-muted-foreground italic">
-                                    No attendance records found for this month.
+                                    No attendance records found for the selected dates.
                                   </td>
                                 </tr>
                               ) : (
-                                [...myAttendance].sort((a, b) => b.date.localeCompare(a.date)).map((rec) => {
+                                [...filteredAttendanceRecords].sort((a, b) => b.date.localeCompare(a.date)).map((rec) => {
                                   const dateStr = new Date(rec.date).toLocaleDateString(undefined, {
                                     weekday: 'short',
                                     year: 'numeric',

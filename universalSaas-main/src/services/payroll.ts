@@ -145,7 +145,10 @@ export const payrollService = {
     rolesApi.patch<PayrollRunEntry>(`/payroll/entries/${id}/`, data),
   addAdjustment: (id: string, data: { type: string; amount: string; reason: string }) =>
     rolesApi.post<PayrollRunEntry>(`/payroll/entries/${id}/adjust/`, data),
-  getMyPayslips: (employeeId?: string) => rolesApi.get<unknown[]>('/payroll/payslips/', { params: { employee: employeeId } }),
+  getMyPayslips: (employeeId?: string, startDate?: string, endDate?: string) =>
+    rolesApi.get<unknown[]>('/payroll/payslips/', {
+      params: { employee: employeeId, start_date: startDate, end_date: endDate },
+    }),
   getPayslipDetail: (month: number, year: number) =>
     rolesApi.get<Payslip>(`/payroll/payslips/${month}/${year}/`),
   getDashboardStats: () => rolesApi.get<PayrollDashboardStats>('/payroll/dashboard-stats/'),

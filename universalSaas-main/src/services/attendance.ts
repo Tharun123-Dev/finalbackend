@@ -103,10 +103,14 @@ export const attendanceService = {
     hours_worked?: number;
     ot_hours?: number;
   }>('/attendance/today/'),
-  getMyAttendance: (month: number, year: number, employeeId?: string) =>
-    rolesApi.get<MonthlyAttendanceResponse | AttendanceRecord[]>('/attendance/my/', { params: { month, year, employee: employeeId } }),
-  getAllAttendance: (month: number, year: number, employeeId?: string) =>
-    rolesApi.get<AttendanceRecord[]>('/attendance/all/', { params: { month, year, employee: employeeId } }),
+  getMyAttendance: (month: number, year: number, employeeId?: string, startDate?: string, endDate?: string) =>
+    rolesApi.get<MonthlyAttendanceResponse | AttendanceRecord[]>('/attendance/my/', {
+      params: { month, year, employee: employeeId, start_date: startDate, end_date: endDate },
+    }),
+  getAllAttendance: (month: number, year: number, employeeId?: string, startDate?: string, endDate?: string) =>
+    rolesApi.get<AttendanceRecord[]>('/attendance/all/', {
+      params: { month, year, employee: employeeId, start_date: startDate, end_date: endDate },
+    }),
   applyRegularization: (data: { date: string; requested_check_in?: string; requested_check_out?: string; reason: string }) => {
     const formatTime = (t?: string) => t ? (t.length === 5 ? `${t}:00` : t) : null;
     return rolesApi.post<RegularizationRequest>('/attendance/regularize/', {

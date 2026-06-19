@@ -138,16 +138,16 @@ export const leaveService = {
   // Leave Applications
   applyLeave: (data: { leave_type: string; start_date: string; end_date: string; session: string; reason: string; doc_url?: string }) =>
     rolesApi.post('/leave/apply/', data),
-  getMyRequests: (status?: string) =>
-    rolesApi.get<LeaveRequest[]>('/leave/my/', { params: { status } }).then(response => ({
+  getMyRequests: (status?: string, startDate?: string, endDate?: string) =>
+    rolesApi.get<LeaveRequest[]>('/leave/my/', { params: { status, start_date: startDate, end_date: endDate } }).then(response => ({
       ...response,
       data: (response.data || []).map(normalizeLeaveRequest),
     })),
   cancelLeave: (id: number) => rolesApi.post(`/leave/${id}/cancel/`),
 
   // Leave Approvals
-  getAllRequests: (status?: string, employee?: string) =>
-    rolesApi.get<LeaveRequest[]>('/leave/all/', { params: { status, employee } }).then(response => ({
+  getAllRequests: (status?: string, employee?: string, startDate?: string, endDate?: string) =>
+    rolesApi.get<LeaveRequest[]>('/leave/all/', { params: { status, employee, start_date: startDate, end_date: endDate } }).then(response => ({
       ...response,
       data: (response.data || []).map(normalizeLeaveRequest),
     })),

@@ -20,6 +20,15 @@ from .utils import (
 COMP_OFF_CODES = {'COMP_OFF', 'COMP', 'CO', 'COMPENSATORY'}
 
 
+def _parse_query_date(value):
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_comp_off_type(leave_type):
     return (leave_type.code or '').upper() in COMP_OFF_CODES
 
@@ -508,12 +517,20 @@ class MyLeaveRequestsView(APIView):
 
     def get(self, request):
         status_filter = request.query_params.get('status')
+        start_date = _parse_query_date(request.query_params.get('start_date'))
+        end_date = _parse_query_date(request.query_params.get('end_date'))
+        if start_date and end_date and start_date > end_date:
+            start_date, end_date = end_date, start_date
         qs = LeaveRequest.objects.filter(
             employee=request.user,
             tenant_id=get_tenant_id(request),
         ).select_related('leave_type', 'approved_by')
         if status_filter:
             qs = qs.filter(status=status_filter)
+        if start_date:
+            qs = qs.filter(end_date__gte=start_date)
+        if end_date:
+            qs = qs.filter(start_date__lte=end_date)
         return Response(LeaveRequestSerializer(qs, many=True).data)
 
 
@@ -591,6 +608,10 @@ class AllLeaveRequestsView(APIView):
 
         status_filter = request.query_params.get('status')
         emp_id        = request.query_params.get('employee')
+        start_date    = _parse_query_date(request.query_params.get('start_date'))
+        end_date      = _parse_query_date(request.query_params.get('end_date'))
+        if start_date and end_date and start_date > end_date:
+            start_date, end_date = end_date, start_date
 
         visible_ids = visible_user_ids(request)
         qs = LeaveRequest.objects.select_related(
@@ -599,6 +620,10 @@ class AllLeaveRequestsView(APIView):
 
         if status_filter:
             qs = qs.filter(status=status_filter)
+        if start_date:
+            qs = qs.filter(end_date__gte=start_date)
+        if end_date:
+            qs = qs.filter(start_date__lte=end_date)
         if emp_id:
             target_user = resolve_visible_user(request, emp_id)
             if not target_user:

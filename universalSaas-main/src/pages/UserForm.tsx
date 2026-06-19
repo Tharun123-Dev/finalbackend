@@ -1176,6 +1176,33 @@ const supervisorLabel = (supervisor?: Supervisor) => {
     return supervisor.name.replace(/\s*\[[^\]]+\]\s*$/, '').trim() || null;
 };
 
+const employeeCodeFromSupervisor = (supervisor?: Supervisor) => {
+    if (!supervisor) return '';
+    const explicitCode = supervisor.employeeId || supervisor.empCode;
+    if (explicitCode) return explicitCode;
+    const match = supervisor.name.match(/\(([^)]+)\)/);
+    return match?.[1]?.trim() || '';
+};
+
+const numericIdFromEmployeeCode = (code: string | null) => {
+    const match = String(code || '').match(/(\d+)\s*$/);
+    return match ? Number(match[1]) : null;
+};
+
+const usernameFromSupervisor = (supervisor?: Supervisor) => {
+    if (!supervisor) return null;
+    const beforeCode = supervisor.name.split('(')[0]?.trim();
+    return beforeCode?.split(/\s+/)[0] || null;
+};
+
+const supervisorUrl = (roleId: string, roles: Role[], excludeUserId?: number | null) => {
+    const params = new URLSearchParams({ roleId });
+    const selectedRole = roles.find((role) => String(role.id) === roleId);
+    if (selectedRole?.name) params.set('roleName', selectedRole.name);
+    if (excludeUserId) params.set('excludeUserId', String(excludeUserId));
+    return `/users/supervisors?${params.toString()}`;
+};
+
 interface UserFormProps {
     userId?: number | null;
     onClose?: () => void;
@@ -1316,7 +1343,7 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
                         setSupervisorUserId(
                             u.supervisorUserId
                                 ? String(u.supervisorUserId)
-                                : String(pd.reporting_supervisor_id || pd.reportingSupervisorId || '')
+                                : String(u.managerId || pd.reporting_supervisor_id || pd.reportingSupervisorId || '')
                         );
 
                         setEmployeeId(u.employeeId || '');
@@ -1359,7 +1386,7 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
 
         const loadRoleSpecificDetails = async () => {
             try {
-                const supRes = await rolesApi.get<Supervisor[]>(`/users/supervisors?roleId=${selectedRoleId}`, { signal: ctrl.signal });
+                const supRes = await rolesApi.get<Supervisor[]>(supervisorUrl(selectedRoleId, roles, activeId), { signal: ctrl.signal });
                 setSupervisors(supRes.data || []);
             } catch (err: unknown) {
                 const axiosError = err as { name?: string };
@@ -1370,7 +1397,7 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
 
         loadRoleSpecificDetails();
         return () => ctrl.abort();
-    }, [selectedRoleId]);
+    }, [activeId, roles, selectedRoleId]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -1388,6 +1415,10 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
         const selectedWorkMode = availableWorkModes.find((item) => String(item.id) === workModeId)?.name || '';
         const selectedSupervisor = supervisors.find((item) => String(item.id) === supervisorUserId);
         const selectedSupervisorName = supervisorLabel(selectedSupervisor);
+        const supervisorEmployeeId = employeeCodeFromSupervisor(selectedSupervisor) || null;
+        const rawSupervisorApiId = supervisorUserId ? toApiId(supervisorUserId) : null;
+        const supervisorApiId = numericIdFromEmployeeCode(supervisorEmployeeId) || rawSupervisorApiId;
+        const supervisorUsername = usernameFromSupervisor(selectedSupervisor);
         const payload = {
             firstName,
             lastName,
@@ -1395,6 +1426,16 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
             phoneNumber: phoneNumber || null,
             gender,
             roleId: toApiId(selectedRoleId),
+            supervisorUserId: supervisorApiId,
+            supervisor_user_id: supervisorApiId,
+            supervisorId: supervisorApiId,
+            reportingToUserId: supervisorApiId,
+            managerId: supervisorApiId,
+            supervisorEmployeeId,
+            rawSupervisorUserId: rawSupervisorApiId,
+            supervisorUsername,
+            supervisorName: selectedSupervisorName,
+            managerName: selectedSupervisorName,
             employeeId: generatedEmployeeId,
             dateOfBirth: dateOfBirth || null,
             joiningDate: joiningDate || null,
@@ -1414,10 +1455,14 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
                 designation: selectedDesignation || designationId || null,
                 work_mode: selectedWorkMode || workModeId || null,
                 workMode: selectedWorkMode || workModeId || null,
-                reporting_supervisor_id: supervisorUserId || null,
+                reporting_supervisor_id: supervisorApiId,
                 reporting_supervisor_name: selectedSupervisorName,
-                reportingSupervisorId: supervisorUserId || null,
+                reportingSupervisorId: supervisorApiId,
                 reportingSupervisorName: selectedSupervisorName,
+                supervisorUserId: supervisorApiId,
+                supervisorEmployeeId,
+                rawSupervisorUserId: rawSupervisorApiId,
+                supervisorUsername,
             },
 
             permissionIds: selectedPermissions,

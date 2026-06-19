@@ -15,7 +15,8 @@ interface User {
   active: boolean;
   roleId?: number;
   roleName?: string;
-  supervisorUserId?: number;
+  supervisorUserId?: number | string;
+  managerId?: number | string;
   supervisorName?: string;
   managerName?: string;
   employeeId?: string;
@@ -48,9 +49,36 @@ const supervisorLabel = (supervisor?: Supervisor) => {
   return supervisor.name.replace(/\s*\[[^\]]+\]\s*$/, '').trim() || null;
 };
 
-const reportsToName = (user: User) => {
+const employeeCodeFromSupervisor = (supervisor?: Supervisor) => {
+  if (!supervisor) return '';
+  const explicitCode = supervisor.employeeId || supervisor.empCode;
+  if (explicitCode) return explicitCode;
+  const match = supervisor.name.match(/\(([^)]+)\)/);
+  return match?.[1]?.trim() || '';
+};
+
+const numericIdFromEmployeeCode = (code: string | null) => {
+  const match = String(code || '').match(/(\d+)\s*$/);
+  return match ? Number(match[1]) : null;
+};
+
+const usernameFromSupervisor = (supervisor?: Supervisor) => {
+  if (!supervisor) return null;
+  const beforeCode = supervisor.name.split('(')[0]?.trim();
+  return beforeCode?.split(/\s+/)[0] || null;
+};
+
+const supervisorUrl = (roleId: string, roles: Role[], excludeUserId?: number | null) => {
+  const params = new URLSearchParams({ roleId });
+  const selectedRole = roles.find((role) => String(role.id) === roleId);
+  if (selectedRole?.name) params.set('roleName', selectedRole.name);
+  if (excludeUserId) params.set('excludeUserId', String(excludeUserId));
+  return `/users/supervisors?${params.toString()}`;
+};
+
+const reportsToName = (user: User, users: User[] = []) => {
   const profile = user.profileData || {};
-  return (
+  const directName = (
     user.supervisorName ||
     user.managerName ||
     profile.reporting_supervisor_name ||
@@ -59,6 +87,17 @@ const reportsToName = (user: User) => {
     profile.managerName ||
     ''
   );
+  if (directName) return String(directName);
+
+  const supervisorId =
+    user.supervisorUserId ||
+    user.managerId ||
+    profile.reporting_supervisor_id ||
+    profile.reportingSupervisorId;
+  if (!supervisorId) return '';
+
+  const supervisor = users.find((item) => String(item.id) === String(supervisorId));
+  return supervisor ? `${supervisor.firstName || ''} ${supervisor.lastName || ''}`.trim() : '';
 };
 
 interface ExtraField {
@@ -167,7 +206,7 @@ export default function UserManager() {
 
     const fetchSupervisors = async () => {
       try {
-        const response = await rolesApi.get<Supervisor[]>(`/users/supervisors?roleId=${selectedRoleId}`, {
+        const response = await rolesApi.get<Supervisor[]>(supervisorUrl(selectedRoleId, roles, editingId), {
           signal: controller.signal,
         });
         setSupervisors(response.data || []);
@@ -184,13 +223,17 @@ export default function UserManager() {
     return () => {
       controller.abort();
     };
-  }, [selectedRoleId]);
+  }, [editingId, roles, selectedRoleId]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
 
     const selectedSupervisor = supervisors.find((item) => String(item.id) === supervisorUserId);
     const selectedSupervisorName = supervisorLabel(selectedSupervisor);
+    const supervisorEmployeeId = employeeCodeFromSupervisor(selectedSupervisor) || null;
+    const rawSupervisorApiId = supervisorUserId ? toApiId(supervisorUserId) : null;
+    const supervisorApiId = numericIdFromEmployeeCode(supervisorEmployeeId) || rawSupervisorApiId;
+    const supervisorUsername = usernameFromSupervisor(selectedSupervisor);
 
     const payload = {
       firstName,
@@ -200,6 +243,16 @@ export default function UserManager() {
       phoneNumber,
       gender,
       roleId: toApiId(selectedRoleId),
+      supervisorUserId: supervisorApiId,
+      supervisor_user_id: supervisorApiId,
+      supervisorId: supervisorApiId,
+      reportingToUserId: supervisorApiId,
+      managerId: supervisorApiId,
+      supervisorEmployeeId,
+      rawSupervisorUserId: rawSupervisorApiId,
+      supervisorUsername,
+      supervisorName: selectedSupervisorName,
+      managerName: selectedSupervisorName,
       employeeId: employeeId || null,
       profileData: {
         ...profileData,
@@ -210,10 +263,14 @@ export default function UserManager() {
         work_mode: workMode,
         date_of_birth: dateOfBirth,
         address: address,
-        reporting_supervisor_id: supervisorUserId || null,
+        reporting_supervisor_id: supervisorApiId,
         reporting_supervisor_name: selectedSupervisorName,
-        reportingSupervisorId: supervisorUserId || null,
+        reportingSupervisorId: supervisorApiId,
         reportingSupervisorName: selectedSupervisorName,
+        supervisorUserId: supervisorApiId,
+        supervisorEmployeeId,
+        rawSupervisorUserId: rawSupervisorApiId,
+        supervisorUsername,
       },
     };
 
@@ -282,7 +339,7 @@ export default function UserManager() {
     setSupervisorUserId(
       user.supervisorUserId
         ? String(user.supervisorUserId)
-        : String(pd.reporting_supervisor_id || pd.reportingSupervisorId || '')
+        : String(user.managerId || pd.reporting_supervisor_id || pd.reportingSupervisorId || '')
     );
     setEmpCode(String(pd.emp_code || user.employeeId || ''));
     setJoiningDate(String(pd.joining_date || new Date().toISOString().split('T')[0]));
@@ -467,9 +524,9 @@ export default function UserManager() {
                         {user.profileData?.joining_date ? String(user.profileData.joining_date) : <span className="text-muted-foreground/40">—</span>}
                       </td>
                       <td className="py-3.5 px-4">
-                        {reportsToName(user) ? (
+                        {reportsToName(user, users) ? (
                           <span className="text-foreground text-xs font-medium">
-                            {reportsToName(user)}
+                            {reportsToName(user, users)}
                           </span>
                         ) : (
                           <span className="text-muted-foreground/40">—</span>

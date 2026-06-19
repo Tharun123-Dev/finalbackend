@@ -45,6 +45,15 @@ def _get_general(key, default='', tenant_id='default'):
     return default
 
 
+def _parse_query_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return None
+
+
 # ── PAYROLL SETTINGS DEFAULTS (for salary config auto-fill) ───────────────────
 
 class PayrollSettingsDefaultsView(APIView):
@@ -714,6 +723,10 @@ class MyPayslipListView(APIView):
 
     def get(self, request):
         emp_id = request.query_params.get('employee') or request.query_params.get('employee_id')
+        start_date = _parse_query_date(request.query_params.get('start_date'))
+        end_date = _parse_query_date(request.query_params.get('end_date'))
+        if start_date and end_date and start_date > end_date:
+            start_date, end_date = end_date, start_date
         target_user = request.user
 
         if emp_id:
@@ -728,6 +741,10 @@ class MyPayslipListView(APIView):
         ).select_related('payroll_run', 'salary_structure').order_by(
             '-payroll_run__year', '-payroll_run__month'
         )
+        if start_date:
+            entries = entries.filter(payroll_run__period_end__gte=start_date)
+        if end_date:
+            entries = entries.filter(payroll_run__period_start__lte=end_date)
         return Response(PayrollEntrySerializer(entries, many=True).data)
 
 

@@ -56,6 +56,15 @@ def _now_time_local() -> time:
     return _now_local().time().replace(tzinfo=None)
 
 
+def _parse_query_date(value):
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _base_role_from_external(value):
     role = str(value or '').lower().replace('-', '_').replace(' ', '_')
     if 'super' in role and 'admin' in role:
@@ -645,6 +654,10 @@ class MyAttendanceView(APIView):
         today = _today_local()
         month = int(request.query_params.get('month', today.month))
         year  = int(request.query_params.get('year',  today.year))
+        period_start = _parse_query_date(request.query_params.get('start_date')) or date(year, month, 1)
+        period_end = _parse_query_date(request.query_params.get('end_date')) or date(year, month, cal_mod.monthrange(year, month)[1])
+        if period_start > period_end:
+            period_start, period_end = period_end, period_start
         emp_id = request.query_params.get('employee')
         target_user = request.user
         if emp_id:
@@ -653,7 +666,7 @@ class MyAttendanceView(APIView):
                 return Response({'error': 'Employee is outside your HRMS visibility scope'}, status=status.HTTP_403_FORBIDDEN)
 
         records = AttendanceRecord.objects.filter(
-            employee=target_user, date__year=year, date__month=month,
+            employee=target_user, date__gte=period_start, date__lte=period_end,
         ).order_by('date')
 
         for record in records:
@@ -702,8 +715,8 @@ class MyAttendanceView(APIView):
         from leave.models import LeaveRequest
         approved_leaves = LeaveRequest.objects.filter(
             employee=target_user, status='approved',
-            start_date__lte=date(year, month, cal_mod.monthrange(year, month)[1]),
-            end_date__gte=date(year, month, 1),
+            start_date__lte=period_end,
+            end_date__gte=period_start,
         ).select_related('leave_type')
 
         leave_dates = {}
@@ -711,11 +724,11 @@ class MyAttendanceView(APIView):
             is_lop = (not lr.leave_type.is_paid) or (lr.leave_type.code == 'LOP')
             cur = lr.start_date
             while cur <= lr.end_date:
-                if cur.year == year and cur.month == month:
+                if period_start <= cur <= period_end:
                     leave_dates[str(cur)] = {'name': lr.leave_type.name, 'is_lop': is_lop}
                 cur += timedelta(days=1)
 
-        holidays = list(Holiday.objects.filter(date__year=year, date__month=month).values('date', 'name'))
+        holidays = list(Holiday.objects.filter(date__gte=period_start, date__lte=period_end).values('date', 'name'))
         holiday_date_set = {str(h['date']) for h in holidays}
 
         record_map = {}
@@ -745,9 +758,8 @@ class MyAttendanceView(APIView):
                 rec['pending_reason'] = 'missing_checkout'
 
         from attendance.settings_helper import is_weekend as _is_weekend
-        month_end = date(year, month, cal_mod.monthrange(year, month)[1])
-        visible_until = min(today - timedelta(days=1), month_end)
-        cur = date(year, month, 1)
+        visible_until = min(today - timedelta(days=1), period_end)
+        cur = period_start
         while cur <= visible_until:
             cur_str = str(cur)
             if (
@@ -860,6 +872,8 @@ class MyAttendanceView(APIView):
         return Response({
             'month':    month,
             'year':     year,
+            'start_date': str(period_start),
+            'end_date': str(period_end),
             'summary':  summary,
             'records':  serialized,
             'holidays': holidays,
@@ -887,12 +901,16 @@ class AllAttendanceView(APIView):
         today  = _today_local()
         month  = int(request.query_params.get('month', today.month))
         year   = int(request.query_params.get('year',  today.year))
+        period_start = _parse_query_date(request.query_params.get('start_date')) or date(year, month, 1)
+        period_end = _parse_query_date(request.query_params.get('end_date')) or date(year, month, cal_mod.monthrange(year, month)[1])
+        if period_start > period_end:
+            period_start, period_end = period_end, period_start
         emp_id = request.query_params.get('employee')
 
         visible_ids = visible_user_ids(request)
         qs = AttendanceRecord.objects.filter(
             tenant_id=get_tenant_id(request),
-            date__year=year, date__month=month,
+            date__gte=period_start, date__lte=period_end,
             employee_id__in=visible_ids,
         ).select_related('employee', 'employee__profile').order_by('employee__username', 'date')
 
