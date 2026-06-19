@@ -1,4 +1,5 @@
 # accounts/views.py
+from django.db.models import Q
 from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -9,6 +10,155 @@ from utils.permissions import make_permission, IsAuthenticatedUser
 from accounts.tenant_utils import get_tenant_id
 from .models import CustomRole, User
 from .serializers import MyTokenObtainPairSerializer, CreateUserSerializer, UserSerializer
+
+
+def _java_value(item, *keys):
+    for key in keys:
+        value = item.get(key) if isinstance(item, dict) else None
+        if value not in (None, ''):
+            return value
+    return None
+
+
+def _java_user_id(item):
+    return str(_java_value(item, 'id', 'userId', 'user_id') or '').strip()
+
+
+def _java_supervisor_id(item):
+    return str(_java_value(
+        item,
+        'supervisorUserId',
+        'supervisor_user_id',
+        'reportingToUserId',
+        'managerId',
+        'supervisorId',
+    ) or '').strip()
+
+
+def _classify_role_name(value):
+    normalized = str(value or '').lower().replace('-', '_').replace(' ', '_')
+    if 'super' in normalized and 'admin' in normalized:
+        return 'superadmin'
+    if normalized in {'admin', 'tenant_admin', 'company_admin', 'platform_admin', 'system_admin'}:
+        return 'admin'
+    if 'hr' in normalized or 'human_resource' in normalized:
+        return 'hr'
+    if 'manager' in normalized or 'head' in normalized or 'director' in normalized:
+        return 'manager'
+    if 'team_lead' in normalized or 'teamlead' in normalized or 'teamleader' in normalized or normalized in {'tl'} or 'leader' in normalized:
+        return 'team_lead'
+    return 'employee'
+
+
+def _java_role_label(item):
+    role = item.get('role') if isinstance(item, dict) else None
+    if isinstance(role, dict):
+        return role.get('name') or role.get('code') or role.get('displayName') or ''
+    return (
+        _java_value(item, 'roleName', 'role', 'roleCode', 'authority')
+        or ''
+    )
+
+
+def _java_profile_data(item):
+    profile = item.get('profileData') if isinstance(item, dict) else None
+    return profile if isinstance(profile, dict) else {}
+
+
+def _java_display_name(item):
+    first_name = str(_java_value(item, 'firstName', 'first_name') or '').strip()
+    last_name = str(_java_value(item, 'lastName', 'last_name') or '').strip()
+    full_name = f'{first_name} {last_name}'.strip()
+    return full_name or str(_java_value(item, 'displayName', 'name', 'username', 'email') or 'User')
+
+
+def _java_emp_code(item):
+    profile_data = _java_profile_data(item)
+    return str(
+        _java_value(item, 'employeeId', 'emp_code', 'empCode')
+        or profile_data.get('emp_code')
+        or profile_data.get('employeeId')
+        or ''
+    ).strip()
+
+
+def _java_item_to_user_option(item):
+    item_id = _java_user_id(item)
+    role_label = _java_role_label(item)
+    profile_data = _java_profile_data(item)
+    designation = str(profile_data.get('designation') or '').strip()
+    emp_code = _java_emp_code(item)
+    display_name = _java_display_name(item)
+    return {
+        'id': item_id,
+        'userId': item_id,
+        'name': f'{display_name} ({emp_code})' if emp_code else display_name,
+        'displayName': display_name,
+        'username': str(_java_value(item, 'username', 'userName', 'email') or '').strip(),
+        'email': str(_java_value(item, 'email', 'username') or '').strip(),
+        'role': role_label,
+        'roleGroup': _classify_role_name(f'{role_label} {designation}'),
+        'designation': designation,
+        'employeeId': emp_code,
+        'empCode': emp_code,
+        'supervisorUserId': _java_supervisor_id(item) or None,
+        'managerId': _java_supervisor_id(item) or None,
+    }
+
+
+def _active_java_users(request):
+    token = getattr(request.user, '_java_token', None)
+    if not token:
+        return []
+    try:
+        from utils.java_bridge import list_users
+
+        return [
+            item for item in list_users(token)
+            if isinstance(item, dict) and item.get('active', True) is not False
+        ]
+    except Exception as e:
+        print(f"Error fetching Java users: {e}")
+        return []
+
+
+def _local_user_option(user):
+    profile = getattr(user, 'profile', None)
+    display_name = user.get_full_name() or user.username
+    emp_code = getattr(profile, 'emp_code', '') or ''
+    manager_id = getattr(profile, 'manager_id', None)
+    return {
+        'id': user.id,
+        'userId': user.id,
+        'name': f'{display_name} ({emp_code})' if emp_code else display_name,
+        'displayName': display_name,
+        'username': user.username,
+        'email': user.email,
+        'role': user.get_display_role(),
+        'roleGroup': _classify_role_name(f'{user.get_display_role()} {getattr(profile, "designation", "")}'),
+        'designation': getattr(profile, 'designation', ''),
+        'employeeId': emp_code,
+        'empCode': emp_code,
+        'supervisorUserId': manager_id,
+        'managerId': manager_id,
+    }
+
+
+def _hierarchy_users(request):
+    java_users = _active_java_users(request)
+    if java_users:
+        return [_java_item_to_user_option(item) for item in java_users if _java_user_id(item)]
+
+    from employees.access import visible_user_queryset
+
+    return [
+        _local_user_option(user)
+        for user in visible_user_queryset(request, include_self=True).select_related('profile', 'custom_role')
+    ]
+
+
+def _sort_options(items):
+    return sorted(items, key=lambda item: str(item.get('name') or '').lower())
 
 
 class MyTokenObtainPairView(TokenObtainPairView):
@@ -47,20 +197,6 @@ class SupervisorOptionsView(APIView):
         target_level = None
         token = getattr(request.user, '_java_token', None)
 
-        def classify_role_name(value):
-            normalized = str(value or '').lower().replace('-', '_').replace(' ', '_')
-            if 'super' in normalized and 'admin' in normalized:
-                return 'superadmin'
-            if normalized in {'admin', 'tenant_admin', 'company_admin', 'platform_admin', 'system_admin'}:
-                return 'admin'
-            if 'hr' in normalized or 'human_resource' in normalized:
-                return 'hr'
-            if 'manager' in normalized or 'head' in normalized or 'director' in normalized:
-                return 'manager'
-            if 'team_lead' in normalized or 'teamlead' in normalized or 'teamleader' in normalized or normalized in {'tl'} or 'leader' in normalized:
-                return 'team_lead'
-            return 'employee'
-
         if role_id:
             try:
                 custom_role = CustomRole.objects.get(pk=role_id, tenant_id=tenant_id, is_active=True)
@@ -69,7 +205,7 @@ class SupervisorOptionsView(APIView):
                 # Defensive fallback: if base_role is generic 'employee', try to classify custom role's name/display_name
                 if target_role == 'employee' or not target_role:
                     alt_name = custom_role.name or custom_role.display_name
-                    if alt_name and classify_role_name(alt_name) != 'employee':
+                    if alt_name and _classify_role_name(alt_name) != 'employee':
                         target_role = alt_name
             except (CustomRole.DoesNotExist, ValueError, TypeError):
                 target_role = None
@@ -117,25 +253,6 @@ class SupervisorOptionsView(APIView):
         current_java_id = str(getattr(request.user, '_java_user_id', '') or '').strip()
         java_supervisors = []
 
-        def java_value(item, *keys):
-            for key in keys:
-                value = item.get(key) if isinstance(item, dict) else None
-                if value not in (None, ''):
-                    return value
-            return None
-
-        def java_user_id(item):
-            return str(java_value(item, 'id', 'userId', 'user_id') or '').strip()
-
-        def java_supervisor_id(item):
-            return str(java_value(
-                item,
-                'supervisorUserId',
-                'supervisor_user_id',
-                'reportingToUserId',
-                'managerId',
-            ) or '').strip()
-
         def java_role_parts(item):
             role = item.get('role') if isinstance(item, dict) else None
             if isinstance(role, dict):
@@ -151,38 +268,28 @@ class SupervisorOptionsView(APIView):
             }
 
         # Classify the target role
-        classified_target = classify_role_name(target_role)
+        classified_target = _classify_role_name(target_role)
 
-        # Define the allowed supervisor groups
-        if classified_target == 'employee':
-            allowed_groups = {'superadmin', 'admin', 'hr', 'manager', 'team_lead'}
-        elif classified_target == 'hr':
-            allowed_groups = {'superadmin', 'admin', 'manager'}
-        elif classified_target == 'manager':
-            allowed_groups = {'superadmin', 'admin'}
-        elif classified_target == 'team_lead':
-            allowed_groups = {'superadmin', 'admin', 'hr', 'manager'}
-        else:
+        # Supervisors are account holders above normal employees.
+        allowed_groups = {'superadmin', 'admin', 'hr', 'manager', 'team_lead'}
+        if classified_target == 'superadmin':
             allowed_groups = set()
 
         def java_name(item):
-            first_name = str(java_value(item, 'firstName', 'first_name') or '').strip()
-            last_name = str(java_value(item, 'lastName', 'last_name') or '').strip()
-            full_name = f'{first_name} {last_name}'.strip()
-            return full_name or str(java_value(item, 'displayName', 'name', 'username', 'email') or 'User')
+            return _java_display_name(item)
 
         def scoped_java_ids(java_users):
             if getattr(request.user, '_java_is_superuser', False):
-                return {java_user_id(item) for item in java_users if java_user_id(item)}
+                return {_java_user_id(item) for item in java_users if _java_user_id(item)}
             visible = {current_java_id} if current_java_id else set()
             frontier = list(visible)
             while frontier:
                 next_frontier = []
                 for item in java_users:
-                    item_id = java_user_id(item)
+                    item_id = _java_user_id(item)
                     if not item_id or item_id in visible:
                         continue
-                    if java_supervisor_id(item) in frontier:
+                    if _java_supervisor_id(item) in frontier:
                         visible.add(item_id)
                         next_frontier.append(item_id)
                 frontier = next_frontier
@@ -198,12 +305,12 @@ class SupervisorOptionsView(APIView):
                 visible_java_ids = scoped_java_ids(java_users)
                 seen_java_ids = set()
                 for ju in java_users:
-                    item_id = java_user_id(ju)
+                    item_id = _java_user_id(ju)
                     if not item_id or item_id in seen_java_ids or item_id not in visible_java_ids:
                         continue
 
                     # Classify the java user's roles
-                    item_roles = {classify_role_name(part) for part in java_role_parts(ju) if part}
+                    item_roles = {_classify_role_name(part) for part in java_role_parts(ju) if part}
 
                     # Check designation as well in profile data
                     profile_data = ju.get('profileData') or {}
@@ -234,7 +341,7 @@ class SupervisorOptionsView(APIView):
                         or ''
                     )
                     display_name = java_name(ju)
-                    username = str(java_value(ju, 'username', 'userName', 'email') or '').strip()
+                    username = str(_java_value(ju, 'username', 'userName', 'email') or '').strip()
                     java_supervisors.append({
                         'id': item_id,
                         'name': f'{display_name} ({emp_code})' if emp_code else display_name,
@@ -250,7 +357,6 @@ class SupervisorOptionsView(APIView):
             return Response(sorted(java_supervisors, key=lambda item: item['name'].lower()))
 
         # Fallback Django DB filtering
-        from django.db.models import Q
         q_filter = Q()
         if allowed_groups:
             q_parts = []
@@ -317,6 +423,101 @@ class SupervisorOptionsView(APIView):
             })
 
         return Response(supervisors)
+
+
+class UserHierarchyView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        users = _hierarchy_users(request)
+        managers = [item for item in users if item.get('roleGroup') in {'superadmin', 'admin', 'manager'}]
+        hrs = [item for item in users if item.get('roleGroup') == 'hr']
+        employees = [item for item in users if item.get('roleGroup') not in {'superadmin', 'admin', 'manager', 'hr'}]
+        links = [
+            {
+                'userId': item.get('userId'),
+                'managerId': item.get('managerId'),
+                'supervisorUserId': item.get('supervisorUserId'),
+            }
+            for item in users
+            if item.get('managerId') or item.get('supervisorUserId')
+        ]
+        return Response({
+            'users': _sort_options(users),
+            'managers': _sort_options(managers),
+            'hrs': _sort_options(hrs),
+            'employees': _sort_options(employees),
+            'links': links,
+        })
+
+
+class UserManagersView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request):
+        users = _hierarchy_users(request)
+        managers = [
+            item for item in users
+            if item.get('roleGroup') in {'superadmin', 'admin', 'manager'}
+        ]
+        return Response(_sort_options(managers))
+
+
+class ManagerHrsView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request, manager_id):
+        manager_id = str(manager_id)
+        users = _hierarchy_users(request)
+        hrs = [
+            item for item in users
+            if item.get('roleGroup') == 'hr'
+            and str(item.get('managerId') or item.get('supervisorUserId') or '') == manager_id
+        ]
+        if not hrs:
+            hrs = [item for item in users if item.get('roleGroup') == 'hr']
+        return Response(_sort_options(hrs))
+
+
+class HrEmployeesView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request, hr_id):
+        hr_id = str(hr_id)
+        users = _hierarchy_users(request)
+        employees = [
+            item for item in users
+            if item.get('roleGroup') not in {'superadmin', 'admin', 'manager', 'hr'}
+            and str(item.get('managerId') or item.get('supervisorUserId') or '') == hr_id
+        ]
+        return Response(_sort_options(employees))
+
+
+class TeamMembersView(APIView):
+    permission_classes = [IsAuthenticatedUser]
+
+    def get(self, request, user_id):
+        user_id = str(user_id)
+        users = _hierarchy_users(request)
+        by_manager = {}
+        for item in users:
+            manager_id = str(item.get('managerId') or item.get('supervisorUserId') or '')
+            if manager_id:
+                by_manager.setdefault(manager_id, []).append(item)
+
+        team = []
+        seen = set()
+        queue = [user_id]
+        while queue:
+            current_id = queue.pop(0)
+            for item in by_manager.get(current_id, []):
+                item_id = str(item.get('userId') or item.get('id') or '')
+                if not item_id or item_id in seen:
+                    continue
+                seen.add(item_id)
+                team.append(item)
+                queue.append(item_id)
+        return Response(_sort_options(team))
 
 
 class MeView(APIView):

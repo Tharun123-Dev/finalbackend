@@ -19,10 +19,24 @@ interface User {
   roleName?: string;
   supervisorUserId?: number;
   supervisorName?: string;
+  managerName?: string;
   employeeId?: string;
   leadId?: string;
   profileData?: Record<string, unknown>;
 }
+
+const reportsToName = (user: User) => {
+  const profile = user.profileData || {};
+  return (
+    user.supervisorName ||
+    user.managerName ||
+    profile.reporting_supervisor_name ||
+    profile.reportingSupervisorName ||
+    profile.supervisorName ||
+    profile.managerName ||
+    ''
+  );
+};
 
 export default function UserList() {
   const { hasPermission } = usePermissions();
@@ -244,7 +258,7 @@ export default function UserList() {
 
                     {/* Reports To */}
                     <td className="py-3.5 px-4 text-muted-foreground text-xs">
-                      {user.supervisorName || <span className="text-muted-foreground">—</span>}
+                      {reportsToName(user) || <span className="text-muted-foreground">—</span>}
                     </td>
 
                     {/* Action buttons */}

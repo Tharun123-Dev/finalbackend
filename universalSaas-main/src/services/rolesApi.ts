@@ -88,6 +88,11 @@ rolesApi.interceptors.request.use(
     let isLapRoute = 
       url.startsWith('/attendance') ||
       url.startsWith('/users/supervisors') ||
+      url.startsWith('/users/hierarchy') ||
+      url.startsWith('/users/managers') ||
+      /^\/users\/manager\/[^/]+\/hrs\/?$/.test(url) ||
+      /^\/users\/hr\/[^/]+\/employees\/?$/.test(url) ||
+      /^\/users\/[^/]+\/team-members\/?$/.test(url) ||
       url.startsWith('/leave') ||
       url.startsWith('/payroll') ||
       url.startsWith('/reports') ||
