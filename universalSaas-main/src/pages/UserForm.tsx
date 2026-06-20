@@ -1059,6 +1059,8 @@ interface Role {
     id: number;
     name: string;
     active: boolean;
+    base_role?: string;
+    display_name?: string;
     showInUserForm?: boolean;
 }
 
@@ -1068,6 +1070,20 @@ interface Supervisor {
     role?: string;
     employeeId?: string;
     empCode?: string;
+}
+
+interface LocalUser {
+    id: number | string;
+    firstName?: string;
+    lastName?: string;
+    username?: string;
+    email?: string;
+    active?: boolean;
+    role?: string;
+    roleName?: string;
+    employeeId?: string;
+    empCode?: string;
+    profileData?: Record<string, unknown>;
 }
 
 interface LookupEntity {
@@ -1184,23 +1200,89 @@ const employeeCodeFromSupervisor = (supervisor?: Supervisor) => {
     return match?.[1]?.trim() || '';
 };
 
-const numericIdFromEmployeeCode = (code: string | null) => {
-    const match = String(code || '').match(/(\d+)\s*$/);
-    return match ? Number(match[1]) : null;
-};
-
 const usernameFromSupervisor = (supervisor?: Supervisor) => {
     if (!supervisor) return null;
     const beforeCode = supervisor.name.split('(')[0]?.trim();
     return beforeCode?.split(/\s+/)[0] || null;
 };
 
-const supervisorUrl = (roleId: string, roles: Role[], excludeUserId?: number | null) => {
-    const params = new URLSearchParams({ roleId });
-    const selectedRole = roles.find((role) => String(role.id) === roleId);
-    if (selectedRole?.name) params.set('roleName', selectedRole.name);
-    if (excludeUserId) params.set('excludeUserId', String(excludeUserId));
-    return `/users/supervisors?${params.toString()}`;
+const localUserToSupervisor = (user: LocalUser): Supervisor => {
+    const profile = user.profileData || {};
+    const displayName = `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username || user.email || 'User';
+    const empCode = String(user.employeeId || user.empCode || profile.emp_code || profile.employeeId || '').trim();
+
+    return {
+        id: user.id,
+        name: empCode ? `${displayName} (${empCode})` : displayName,
+        role: user.roleName || user.role || '',
+        employeeId: empCode,
+        empCode,
+    };
+};
+
+const normalizeRoleText = (value: unknown) =>
+    String(value || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+
+const roleGroupFromText = (...values: unknown[]) => {
+    const normalized = values.map(normalizeRoleText).filter(Boolean).join('_');
+    if (!normalized) return 'employee';
+    if (normalized.includes('super') && normalized.includes('admin')) return 'superadmin';
+    if (normalized.includes('admin')) return 'admin';
+    if (normalized.includes('hr') || normalized.includes('human_resource')) return 'hr';
+    if (normalized.includes('manager') || normalized.includes('head') || normalized.includes('director')) return 'manager';
+    if (
+        normalized.includes('team_lead') ||
+        normalized.includes('teamlead') ||
+        normalized.includes('team_leader') ||
+        normalized.includes('teamleaders') ||
+        normalized.includes('team_leaders') ||
+        normalized.includes('leader') ||
+        normalized === 'tl'
+    ) {
+        return 'team_lead';
+    }
+    return 'employee';
+};
+
+const roleGroupForUser = (user: LocalUser) => {
+    const profile = user.profileData || {};
+    return roleGroupFromText(user.role, user.roleName, profile.designation);
+};
+
+const roleGroupForSelectedRole = (roleId: string, roles: Role[]) => {
+    const role = roles.find((item) => String(item.id) === roleId);
+    return roleGroupFromText(role?.base_role, role?.name, role?.display_name);
+};
+
+const allowedSupervisorGroupsForRole = (roleGroup: string) => {
+    switch (roleGroup) {
+        case 'superadmin':
+            return new Set<string>();
+        case 'admin':
+            return new Set(['superadmin']);
+        case 'manager':
+            return new Set(['superadmin', 'admin']);
+        case 'hr':
+            return new Set(['superadmin', 'admin', 'manager']);
+        case 'team_lead':
+            return new Set(['superadmin', 'admin', 'hr']);
+        default:
+            return new Set(['superadmin', 'admin', 'manager', 'hr', 'team_lead']);
+    }
+};
+
+const buildDbSupervisors = (users: LocalUser[], selectedRoleId: string, roles: Role[], excludeUserId?: number | null) => {
+    const allowedGroups = allowedSupervisorGroupsForRole(roleGroupForSelectedRole(selectedRoleId, roles));
+
+    return users
+        .filter((user) => user.active !== false)
+        .filter((user) => !excludeUserId || String(user.id) !== String(excludeUserId))
+        .filter((user) => allowedGroups.has(roleGroupForUser(user)))
+        .map(localUserToSupervisor)
+        .sort((a, b) => a.name.localeCompare(b.name));
 };
 
 interface UserFormProps {
@@ -1234,6 +1316,7 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
 
     // Lookup fields list
     const [roles, setRoles] = useState<Role[]>([]);
+    const [dbUsers, setDbUsers] = useState<LocalUser[]>([]);
     const [supervisors, setSupervisors] = useState<Supervisor[]>([]);
     const [availableEmployeeTypes, setAvailableEmployeeTypes] = useState<LookupEntity[]>([]);
     const [availableDesignations, setAvailableDesignations] = useState<LookupEntity[]>([]);
@@ -1274,6 +1357,15 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
 
                 }
                 setRoles(fetchedRoles);
+
+                try {
+                    const usersRes = await rolesApi.get<LocalUser[]>('/users', { signal: ctrl.signal });
+                    setDbUsers(usersRes.data || []);
+                } catch (err: any) {
+                    if (err?.name === 'CanceledError') throw err;
+                    console.warn('Backend users endpoint failed while loading supervisors:', err);
+                    setDbUsers([]);
+                }
 
                 // Fetch permissions
                 let fetchedPerms: Permission[] = [];
@@ -1375,29 +1467,19 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
         return () => ctrl.abort();
     }, [activeId, isEdit, showToast]);
 
-    // Load supervisors whenever selected Role ID changes
+    // Load supervisors from the same current-DB users list shown on the Users page.
     useEffect(() => {
         if (!selectedRoleId) {
             setSupervisors([]);
             return;
         }
 
-        const ctrl = new AbortController();
-
-        const loadRoleSpecificDetails = async () => {
-            try {
-                const supRes = await rolesApi.get<Supervisor[]>(supervisorUrl(selectedRoleId, roles, activeId), { signal: ctrl.signal });
-                setSupervisors(supRes.data || []);
-            } catch (err: unknown) {
-                const axiosError = err as { name?: string };
-                if (axiosError.name === 'CanceledError') return;
-                setSupervisors([]);
-            }
-        };
-
-        loadRoleSpecificDetails();
-        return () => ctrl.abort();
-    }, [activeId, roles, selectedRoleId]);
+        const nextSupervisors = buildDbSupervisors(dbUsers, selectedRoleId, roles, activeId);
+        setSupervisors(nextSupervisors);
+        if (supervisorUserId && !nextSupervisors.some((item) => String(item.id) === supervisorUserId)) {
+            setSupervisorUserId('');
+        }
+    }, [activeId, dbUsers, roles, selectedRoleId, supervisorUserId]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -1417,7 +1499,7 @@ export default function UserForm({ userId, onClose }: UserFormProps = {}) {
         const selectedSupervisorName = supervisorLabel(selectedSupervisor);
         const supervisorEmployeeId = employeeCodeFromSupervisor(selectedSupervisor) || null;
         const rawSupervisorApiId = supervisorUserId ? toApiId(supervisorUserId) : null;
-        const supervisorApiId = numericIdFromEmployeeCode(supervisorEmployeeId) || rawSupervisorApiId;
+        const supervisorApiId = rawSupervisorApiId;
         const supervisorUsername = usernameFromSupervisor(selectedSupervisor);
         const payload = {
             firstName,

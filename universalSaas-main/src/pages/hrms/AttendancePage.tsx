@@ -2075,35 +2075,13 @@ export function AttendancePage() {
     document.body.removeChild(link);
   };
 
-  // BFS queue starting at user.id to only show reporting subordinates
+  // employeeService.list already returns the current DB users visible to this session.
+  // Re-running hierarchy traversal here can drop direct reports when the auth token id
+  // differs from the local DB user id, so the filter UI should trust that scoped list.
   const filteredEmployees = useMemo(() => {
-    if (isSuperAdmin) {
-      return employees;
-    }
-    if (!user?.id || !employees.length) {
-      return [];
-    }
-    const startId = typeof user.id === 'number' ? user.id : parseInt(String(user.id), 10) || 0;
-    
-    // BFS traversal to collect all direct and indirect report levels
-    const result: EmployeeOption[] = [];
-    const visited = new Set<number>();
-    const queue: number[] = [startId];
-    visited.add(startId);
-
-    while (queue.length > 0) {
-      const currentId = queue.shift()!;
-      const reports = employees.filter(emp => Number(emp.manager) === currentId);
-      for (const emp of reports) {
-        if (!visited.has(emp.user_id)) {
-          visited.add(emp.user_id);
-          result.push(emp);
-          queue.push(emp.user_id);
-        }
-      }
-    }
-    return result;
-  }, [employees, isSuperAdmin, user?.id]);
+    if (isEmployee) return [];
+    return employees;
+  }, [employees, isEmployee]);
 
   const selectedManagerUserId = useMemo(() => {
     const selected = filteredEmployees.find((employee) => attendanceValue(employee) === selectedManagerId);
@@ -2122,13 +2100,11 @@ export function AttendancePage() {
 
   const visibleTls = useMemo(() => {
     let list = filteredEmployees.filter((emp) => getRoleGroup(emp) === 'tl');
-    if (isManager && user?.id) {
-      list = list.filter((emp) => emp.manager === user.id);
-    } else if (selectedManagerUserId) {
-      list = list.filter((emp) => emp.manager === selectedManagerUserId);
+    if (selectedManagerUserId) {
+      list = list.filter((emp) => Number(emp.manager) === selectedManagerUserId);
     }
     return list;
-  }, [filteredEmployees, isManager, user?.id, selectedManagerUserId]);
+  }, [filteredEmployees, selectedManagerUserId]);
 
   const visibleEmployees = useMemo(() => {
     let list = filteredEmployees.filter((emp) => {
@@ -2136,19 +2112,14 @@ export function AttendancePage() {
       return group !== 'manager' && group !== 'hr' && group !== 'tl' && group !== 'admin';
     });
 
-    if (isTl && user?.id) {
-      list = list.filter((emp) => emp.manager === user.id);
-    } else if (selectedTlUserId) {
-      list = list.filter((emp) => emp.manager === selectedTlUserId);
+    if (selectedTlUserId) {
+      list = list.filter((emp) => Number(emp.manager) === selectedTlUserId);
     } else if (selectedManagerUserId) {
       const tlsUnderManager = visibleTls.map(t => t.user_id);
-      list = list.filter((emp) => emp.manager === selectedManagerUserId || tlsUnderManager.includes(emp.manager || 0));
-    } else if (isManager && user?.id) {
-      const tlsUnderManager = visibleTls.map(t => t.user_id);
-      list = list.filter((emp) => emp.manager === user.id || tlsUnderManager.includes(emp.manager || 0));
+      list = list.filter((emp) => Number(emp.manager) === selectedManagerUserId || tlsUnderManager.includes(Number(emp.manager) || 0));
     }
     return list;
-  }, [filteredEmployees, isTl, isManager, user?.id, selectedTlUserId, selectedManagerUserId, visibleTls]);
+  }, [filteredEmployees, selectedTlUserId, selectedManagerUserId, visibleTls]);
 
   return (
     <div className="space-y-6">

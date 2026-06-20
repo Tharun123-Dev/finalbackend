@@ -58,8 +58,10 @@ def _allowed_supervisor_groups(target_role):
         return {'superadmin'}
     if role_group == 'manager':
         return {'superadmin', 'admin'}
-    if role_group in {'hr', 'team_lead'}:
-        return {'superadmin', 'admin', 'manager', 'hr'}
+    if role_group == 'hr':
+        return {'superadmin', 'admin', 'manager'}
+    if role_group == 'team_lead':
+        return {'superadmin', 'admin', 'hr'}
     return {'superadmin', 'admin', 'hr', 'manager', 'team_lead'}
 
 
@@ -157,16 +159,44 @@ def _local_user_option(user):
     }
 
 
+def _local_visible_user_queryset(request, include_self=True):
+    from employees.access import is_hrms_admin, is_manager_like
+
+    tenant_id = get_tenant_id(request)
+    qs = User.objects.filter(tenant_id=tenant_id, is_active=True).select_related(
+        'profile', 'profile__department', 'profile__manager', 'custom_role'
+    )
+    user = request.user
+
+    if is_hrms_admin(user):
+        if include_self:
+            return qs.order_by('first_name', 'last_name', 'username')
+        return qs.exclude(id=user.id).order_by('first_name', 'last_name', 'username')
+
+    has_reports = qs.filter(profile__manager_id=user.id).exists()
+    if is_manager_like(user) or has_reports:
+        seen = set()
+        queue = [user.id]
+        while queue:
+            current_id = queue.pop(0)
+            direct_ids = list(qs.filter(profile__manager_id=current_id).values_list('id', flat=True))
+            for direct_id in direct_ids:
+                if direct_id not in seen:
+                    seen.add(direct_id)
+                    queue.append(direct_id)
+        if include_self:
+            seen.add(user.id)
+        return qs.filter(id__in=seen).order_by('first_name', 'last_name', 'username')
+
+    if include_self:
+        return qs.filter(id=user.id)
+    return qs.none()
+
+
 def _hierarchy_users(request):
-    java_users = _active_java_users(request)
-    if java_users:
-        return [_java_item_to_user_option(item) for item in java_users if _java_user_id(item)]
-
-    from employees.access import visible_user_queryset
-
     return [
         _local_user_option(user)
-        for user in visible_user_queryset(request, include_self=True).select_related('profile', 'custom_role')
+        for user in _local_visible_user_queryset(request, include_self=True)
     ]
 
 
@@ -192,9 +222,8 @@ class ListUsersView(generics.ListAPIView):
 
     def get_queryset(self):
         role = self.request.query_params.get('role')
-        from employees.access import visible_user_queryset
 
-        qs = visible_user_queryset(self.request, include_self=True).order_by('-date_joined')
+        qs = _local_visible_user_queryset(self.request, include_self=True).order_by('-date_joined')
         if role:
             qs = qs.filter(role=role)
         return qs
@@ -259,12 +288,7 @@ class SupervisorOptionsView(APIView):
 
         target_role = str(target_role).lower().strip()
 
-        from employees.access import visible_user_queryset
-
-        qs = visible_user_queryset(request, include_self=True).exclude(id=request.query_params.get('excludeUserId') or None)
-
-        current_java_id = str(getattr(request.user, '_java_user_id', '') or '').strip()
-        java_supervisors = []
+        qs = _local_visible_user_queryset(request, include_self=True).exclude(id=request.query_params.get('excludeUserId') or None)
 
         def java_role_parts(item):
             role = item.get('role') if isinstance(item, dict) else None
@@ -286,85 +310,7 @@ class SupervisorOptionsView(APIView):
         def java_name(item):
             return _java_display_name(item)
 
-        def scoped_java_ids(java_users):
-            if getattr(request.user, '_java_is_superuser', False):
-                return {_java_user_id(item) for item in java_users if _java_user_id(item)}
-            visible = {current_java_id} if current_java_id else set()
-            frontier = list(visible)
-            while frontier:
-                next_frontier = []
-                for item in java_users:
-                    item_id = _java_user_id(item)
-                    if not item_id or item_id in visible:
-                        continue
-                    if _java_supervisor_id(item) in frontier:
-                        visible.add(item_id)
-                        next_frontier.append(item_id)
-                frontier = next_frontier
-            return visible
-
-        if token:
-            try:
-                from utils.java_bridge import list_users
-                java_users = [
-                    ju for ju in list_users(token)
-                    if isinstance(ju, dict) and ju.get('active', True) is not False
-                ]
-                visible_java_ids = scoped_java_ids(java_users)
-                seen_java_ids = set()
-                for ju in java_users:
-                    item_id = _java_user_id(ju)
-                    if not item_id or item_id in seen_java_ids or item_id not in visible_java_ids:
-                        continue
-
-                    # Classify the java user's roles
-                    item_roles = {_classify_role_name(part) for part in java_role_parts(ju) if part}
-
-                    # Check designation as well in profile data
-                    profile_data = ju.get('profileData') or {}
-                    designation = str(profile_data.get('designation') or '').strip().lower()
-                    if designation in {'team_lead', 'project_manager', 'hr_manager'}:
-                        item_roles.add('team_lead')
-
-                    # Check if the java user falls into any of the allowed supervisor groups
-                    has_matching_role = False
-                    for r_name in item_roles:
-                        if r_name in allowed_groups:
-                            has_matching_role = True
-                            break
-                        if r_name in {'superadmin', 'admin'} and ({'superadmin', 'admin'} & allowed_groups):
-                            has_matching_role = True
-                            break
-
-                    if not has_matching_role:
-                        continue
-
-                    seen_java_ids.add(item_id)
-                    role_label = next((part for part in java_role_parts(ju) if part), '')
-                    emp_code = (
-                        ju.get('employeeId')
-                        or ju.get('emp_code')
-                        or profile_data.get('emp_code')
-                        or profile_data.get('employeeId')
-                        or ''
-                    )
-                    display_name = java_name(ju)
-                    username = str(_java_value(ju, 'username', 'userName', 'email') or '').strip()
-                    java_supervisors.append({
-                        'id': item_id,
-                        'name': f'{display_name} ({emp_code})' if emp_code else display_name,
-                        'role': role_label,
-                        'employeeId': emp_code,
-                        'empCode': emp_code,
-                        'username': username,
-                    })
-            except Exception as e:
-                print(f"Error fetching dynamic Java role hierarchy: {e}")
-
-        if java_supervisors:
-            return Response(sorted(java_supervisors, key=lambda item: item['name'].lower()))
-
-        # Fallback Django DB filtering
+        # Django DB filtering for the current tenant only.
         q_filter = Q()
         if allowed_groups:
             q_parts = []
@@ -388,20 +334,6 @@ class SupervisorOptionsView(APIView):
 
         qs = qs.filter(q_filter)
 
-        # Build map of Django users to Java user IDs by matching with java_users list
-        java_user_map = {}
-        if token:
-            try:
-                from utils.java_bridge import list_users
-                java_users = list_users(token)
-                for ju in java_users:
-                    email = (ju.get('email') or ju.get('username') or '').strip().lower()
-                    jid = ju.get('id') or ju.get('userId') or ju.get('user_id')
-                    if email and jid:
-                        java_user_map[email] = str(jid).strip()
-            except Exception as e:
-                print(f"Error building java user map: {e}")
-
         supervisors = []
         seen = set()
         for user in qs.select_related('profile', 'custom_role').order_by('first_name', 'last_name', 'username'):
@@ -409,20 +341,10 @@ class SupervisorOptionsView(APIView):
                 continue
             seen.add(user.id)
 
-            # Find the Java User ID
-            email_key = (user.email or '').strip().lower()
-            java_id_val = java_user_map.get(email_key)
-            if not java_id_val:
-                emp_code = getattr(getattr(user, 'profile', None), 'emp_code', '')
-                if emp_code.startswith('JAVA-'):
-                    java_id_val = emp_code.split('-')[1].strip()
-                else:
-                    java_id_val = str(user.id)
-
             display_name = user.get_full_name() or user.username
             emp_code = getattr(getattr(user, 'profile', None), 'emp_code', '')
             supervisors.append({
-                'id': java_id_val,  # Return Java ID instead of Django PK!
+                'id': user.id,
                 'name': f'{display_name} ({emp_code})' if emp_code else display_name,
                 'role': user.get_display_role(),
                 'employeeId': emp_code,
@@ -540,9 +462,7 @@ class UpdateUserView(generics.RetrieveUpdateAPIView):
     permission_classes = [make_permission('edit_user')]
 
     def get_queryset(self):
-        from employees.access import visible_user_queryset
-
-        return visible_user_queryset(self.request, include_self=True)
+        return _local_visible_user_queryset(self.request, include_self=True)
 
 # ADD to accounts/views.py
 

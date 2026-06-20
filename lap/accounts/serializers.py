@@ -6,12 +6,6 @@ from .models import User, CustomRole
 
 
 def get_user_java_id(user):
-    profile = getattr(user, 'profile', None)
-    if profile and profile.emp_code:
-        import re
-        match = re.search(r'(\d+)\s*$', str(profile.emp_code))
-        if match:
-            return str(int(match.group(1)))
     return str(user.id)
 
 
@@ -81,8 +75,10 @@ def save_user_profile(user, data, tenant_id=None):
 
     # Supervisor / Manager Resolution!
     supervisor_ref = (
-        data.get('supervisorUserId')
+        data.get('rawSupervisorUserId')
+        or data.get('supervisorUserId')
         or data.get('managerId')
+        or profile_data.get('rawSupervisorUserId')
         or profile_data.get('reporting_supervisor_id')
         or profile_data.get('reportingSupervisorId')
     )
