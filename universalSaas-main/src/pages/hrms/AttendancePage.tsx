@@ -1279,7 +1279,7 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 /* eslint-disable react-hooks/exhaustive-deps */
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { MapPin, Clock, Loader2, CheckCircle2, AlertTriangle, RefreshCw, X, Filter, CalendarDays, Users, Search } from 'lucide-react';
 import { PageHeader } from '@/components/shared/PageHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -1320,8 +1320,27 @@ const employeeLabel = (employee: EmployeeOption) => {
 const attendanceValue = (employee: EmployeeOption) => employee.attendance_id || String(employee.user_id);
 const hrmsEmployeeValue = (employee: EmployeeOption) => employee.attendance_id || String(employee.user_id);
 
+const employeeMatchesFilter = (employee: EmployeeOption, value: string) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return false;
+  const normalizedLower = normalized.toLowerCase();
+  return [
+    attendanceValue(employee),
+    hrmsEmployeeValue(employee),
+    employee.attendance_id,
+    employee.user_id,
+    employee.id,
+    employee.email,
+    employee.username,
+    employee.emp_code,
+  ].some((candidate) => {
+    const candidateValue = String(candidate ?? '').trim();
+    return candidateValue === normalized || candidateValue.toLowerCase() === normalizedLower;
+  });
+};
+
 const selectedEmployeeRequestValue = (employees: EmployeeOption[], employeeFilter: string) => {
-  const selected = employees.find((emp) => attendanceValue(emp) === employeeFilter);
+  const selected = employees.find((emp) => employeeMatchesFilter(emp, employeeFilter));
   return selected ? hrmsEmployeeValue(selected) : employeeFilter;
 };
 
@@ -1330,6 +1349,61 @@ const dateInputValue = (value: Date) => {
   const month = String(value.getMonth() + 1).padStart(2, '0');
   const day = String(value.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+};
+
+const excelCell = (value: unknown) => {
+  const text = String(value ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return `<Cell><Data ss:Type="String">${text}</Data></Cell>`;
+};
+
+const excelRow = (cells: unknown[]) => `<Row>${cells.map(excelCell).join('')}</Row>`;
+
+const excelSheet = (name: string, rows: unknown[][]) => {
+  const safeName = String(name || 'Sheet')
+    .replace(/[\u0000-\u001F]/g, '')
+    .replace(/[\[\]:*?/\\]/g, ' ')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .slice(0, 31);
+  return `<Worksheet ss:Name="${safeName}">
+    <Table>${rows.map(excelRow).join('')}</Table>
+  </Worksheet>`;
+};
+
+const downloadExcelWorkbook = (filename: string, sheets: { name: string; rows: unknown[][] }[]) => {
+  const seenNames = new Map<string, number>();
+  const uniqueSheets = sheets.map((sheet) => {
+    const baseName = String(sheet.name || 'Sheet').replace(/[\[\]:*?/\\]/g, ' ').slice(0, 25) || 'Sheet';
+    const count = seenNames.get(baseName) || 0;
+    seenNames.set(baseName, count + 1);
+    return {
+      ...sheet,
+      name: count === 0 ? baseName : `${baseName} ${count + 1}`,
+    };
+  });
+  const workbook = `<?xml version="1.0"?>
+  <?mso-application progid="Excel.Sheet"?>
+  <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+    xmlns:o="urn:schemas-microsoft-com:office:office"
+    xmlns:x="urn:schemas-microsoft-com:office:excel"
+    xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+    ${uniqueSheets.map((sheet) => excelSheet(sheet.name, sheet.rows)).join('')}
+  </Workbook>`;
+  const blob = new Blob([workbook], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename.endsWith('.xls') ? filename : `${filename}.xls`;
+  link.style.visibility = 'hidden';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 };
 
 function haversineMetres(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -1440,11 +1514,13 @@ export function AttendancePage() {
 
   // Hierarchical filter states matching screenshot
   const [selectedManagerId, setSelectedManagerId] = useState('');
+  const [selectedHrId, setSelectedHrId] = useState('');
   const [selectedTlId, setSelectedTlId] = useState('');
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('');
 
   // Sub-states & loaders
   const [loading, setLoading] = useState(false);
+  const hasLoadedOnce = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [actioningId, setActioningId] = useState<string | null>(null);
   const [approvalNote, setApprovalNote] = useState('');
@@ -1467,7 +1543,7 @@ export function AttendancePage() {
   const [officeForm, setOfficeForm] = useState({ name: '', latitude: '', longitude: '', radius_meters: '300' });
   const currentAttendance = todayData?.record || null;
   const selectedEmployee = useMemo(
-    () => employees.find((employee) => attendanceValue(employee) === employeeFilter),
+    () => employees.find((employee) => employeeMatchesFilter(employee, employeeFilter)),
     [employees, employeeFilter]
   );
   const selectedRoleLabel = selectedEmployee ? roleLabel(selectedEmployee.role) : 'Visible HRMS scope';
@@ -1647,10 +1723,33 @@ export function AttendancePage() {
     }
   };
 
+  const locationPoint = useMemo(() => {
+    const record = todayData?.record;
+    const checkinLat = parseCoordinate(record?.checkin_latitude);
+    const checkinLon = parseCoordinate(record?.checkin_longitude);
+    const checkoutLat = parseCoordinate(record?.checkout_latitude);
+    const checkoutLon = parseCoordinate(record?.checkout_longitude);
+    const hasOpenCheckIn = Boolean(record?.check_in && !record?.check_out);
+
+    if (checkoutLat !== null && checkoutLon !== null) {
+      return { latitude: checkoutLat, longitude: checkoutLon, source: 'Logged checkout' };
+    }
+    if (hasOpenCheckIn && gps) {
+      return { latitude: gps.latitude, longitude: gps.longitude, source: 'Live GPS for checkout' };
+    }
+    if (checkinLat !== null && checkinLon !== null) {
+      return { latitude: checkinLat, longitude: checkinLon, source: 'Logged check-in' };
+    }
+    if (gps) {
+      return { latitude: gps.latitude, longitude: gps.longitude, source: 'Live GPS' };
+    }
+    return null;
+  }, [gps, todayData]);
+
   const gpsDistance = useMemo(() => {
-    if (!gps || !office) return null;
-    return haversineMetres(gps.latitude, gps.longitude, Number(office.latitude), Number(office.longitude));
-  }, [gps, office]);
+    if (!locationPoint || !office) return null;
+    return haversineMetres(locationPoint.latitude, locationPoint.longitude, Number(office.latitude), Number(office.longitude));
+  }, [locationPoint, office]);
 
   const withinRadius = useMemo(() => {
     if (isWfh) return true;
@@ -1910,13 +2009,15 @@ export function AttendancePage() {
   };
 
   const isSuperAdmin = ['super_admin', 'superadmin', 'platform_admin', 'system_admin'].includes(userRole) || permissions.includes('*');
+  const isAdmin = isSuperAdmin || userRole === 'admin' || userRole.includes('admin');
   const isHr = !isSuperAdmin && ['hr', 'hr_manager', 'hr_executive', 'hr manager'].includes(userRole);
-  const isManager = !isSuperAdmin && !isHr && (userRole.includes('manager') || ['dept_head', 'department_head'].includes(userRole));
-  const isTl = !isSuperAdmin && !isHr && !isManager && (userRole.includes('leader') || userRole.includes('lead') || ['tl', 'teamleader'].includes(userRole));
-  const isEmployee = !isSuperAdmin && !isHr && !isManager && !isTl;
+  const isManager = !isAdmin && !isHr && (userRole.includes('manager') || ['dept_head', 'department_head'].includes(userRole));
+  const isTl = !isAdmin && !isHr && !isManager && (userRole.includes('leader') || userRole.includes('lead') || ['tl', 'teamleader'].includes(userRole));
+  const isEmployee = !isAdmin && !isHr && !isManager && !isTl;
 
   const resetFilters = () => {
     setSelectedManagerId('');
+    setSelectedHrId('');
     setSelectedTlId('');
     setSelectedEmployeeId('');
     setEmployeeFilter('');
@@ -1926,7 +2027,8 @@ export function AttendancePage() {
   };
 
   useEffect(() => {
-    loadData();
+    loadData(hasLoadedOnce.current);
+    hasLoadedOnce.current = true;
   }, [month, year, approvalsFilter, employeeFilter, searchFilter, dateFrom, dateTo]);
 
   // Fetch detailed info for filtered employee
@@ -1939,7 +2041,9 @@ export function AttendancePage() {
         setSelectedUserPayslips([]);
         return;
       }
-      setSelectedUserDetailsLoading(true);
+      if (!selectedEmployee) {
+        setSelectedUserDetailsLoading(true);
+      }
 
       const targetUserId = selectedEmployeeRequestValue(employees, employeeFilter);
 
@@ -1993,12 +2097,295 @@ export function AttendancePage() {
     fetchSubordinateDetails();
   }, [employeeFilter, year, employees, dateFrom, dateTo]);
 
-  const downloadEmployeeReport = () => {
-    if (!selectedEmployee) return;
+  const downloadEmployeeReport = async () => {
+    const reportEmployees = selectedEmployee ? [selectedEmployee] : employees;
+    if (reportEmployees.length === 0) {
+      toast.error('No users available to export');
+      return;
+    }
 
-    const empName = selectedEmployee.display_name || `${selectedEmployee.first_name} ${selectedEmployee.last_name}`.trim() || selectedEmployee.username;
-    const empCode = selectedEmployee.emp_code || 'N/A';
-    const empRole = roleLabel(selectedEmployee.role);
+    setSubmitting(true);
+
+    const rosterRows = [
+      ['Name', 'Employee Code', 'Email', 'Role', 'Designation', 'Department', 'Work Mode', 'Joining Date', 'Reports To'],
+      ...reportEmployees.map((employee) => [
+        employee.display_name || `${employee.first_name} ${employee.last_name}`.trim() || employee.username,
+        employee.emp_code || 'N/A',
+        employee.email || 'N/A',
+        roleLabel(employee.role),
+        employee.designation || 'N/A',
+        employee.department_name || employee.department || 'N/A',
+        employee.work_mode || 'N/A',
+        employee.joining_date || 'N/A',
+        employee.manager_name || 'N/A',
+      ]),
+    ];
+
+    const employeeName = (employee: EmployeeOption) =>
+      employee.display_name || `${employee.first_name} ${employee.last_name}`.trim() || employee.username;
+
+    const attendanceRows: unknown[][] = [
+      ['Employee', 'Employee Code', 'Date', 'Shift', 'Check In', 'Check Out', 'Status', 'Hours', 'OT Hours', 'Work Mode', 'Holiday', 'Pending Reason'],
+    ];
+    const leaveBalanceRows: unknown[][] = [
+      ['Employee', 'Employee Code', 'Leave Type', 'Total', 'Used', 'Pending', 'Remaining', 'Carried Forward'],
+    ];
+    const leaveRequestRows: unknown[][] = [
+      ['Employee', 'Employee Code', 'Status', 'Leave Type', 'Days', 'Start Date', 'End Date', 'Applied At', 'Approver', 'Reason'],
+    ];
+    const salaryRows: unknown[][] = [
+      ['Employee', 'Employee Code', 'CTC', 'Effective Date', 'Basic', 'HRA', 'DA', 'Transport', 'Medical', 'Other Allowance', 'Gross', 'PF', 'ESI', 'PT', 'Deductions', 'Net Pay'],
+    ];
+    const payslipRows: unknown[][] = [
+      ['Employee', 'Employee Code', 'Period', 'Status', 'Gross', 'Deductions', 'Net'],
+    ];
+
+    try {
+      for (const employee of reportEmployees) {
+        const name = employeeName(employee);
+        const code = employee.emp_code || 'N/A';
+        const targetUserId = hrmsEmployeeValue(employee);
+
+        try {
+          const attendanceRes = await attendanceService.getMyAttendance(
+            month,
+            year,
+            targetUserId,
+            dateFrom || undefined,
+            dateTo || undefined
+          );
+          const payload = attendanceRes.data as AttendanceRecord[] | { records?: AttendanceRecord[] };
+          const records = Array.isArray(payload) ? payload : payload?.records || [];
+          if (records.length) {
+            records.forEach((record) => {
+              attendanceRows.push([
+                name,
+                code,
+                record.date,
+                (record as any).shift_type || 'N/A',
+                formatTime(record.check_in) || '',
+                formatTime(record.check_out) || '',
+                record.status || 'N/A',
+                record.hours_worked ?? '',
+                record.ot_hours ?? '',
+                record.work_mode || '',
+                record.holiday_name || '',
+                record.pending_reason || '',
+              ]);
+            });
+          } else {
+            attendanceRows.push([name, code, 'No attendance records found', '', '', '', '', '', '', '', '', '']);
+          }
+        } catch {
+          attendanceRows.push([name, code, 'Attendance unavailable', '', '', '', '', '', '', '', '', '']);
+        }
+
+        try {
+          const balanceRes = await leaveService.getMyBalance(year, targetUserId);
+          const balances = balanceRes.data || [];
+          if (balances.length) {
+            balances.forEach((balance) => {
+              leaveBalanceRows.push([
+                name,
+                code,
+                balance.leave_type_name || balance.leave_type_code || 'N/A',
+                balance.total,
+                balance.used,
+                balance.pending,
+                balance.remaining,
+                balance.carried_forward ?? balance.carried ?? '',
+              ]);
+            });
+          } else {
+            leaveBalanceRows.push([name, code, 'No leave balances found', '', '', '', '', '']);
+          }
+        } catch {
+          leaveBalanceRows.push([name, code, 'Leave balance unavailable', '', '', '', '', '']);
+        }
+
+        try {
+          const leavesRes = await leaveService.getAllRequests(undefined, targetUserId, dateFrom || undefined, dateTo || undefined);
+          const leaves = leavesRes.data || [];
+          if (leaves.length) {
+            leaves.forEach((request) => {
+              leaveRequestRows.push([
+                name,
+                code,
+                request.status,
+                request.leave_type_name || request.leave_type || 'N/A',
+                request.days,
+                request.start_date,
+                request.end_date,
+                request.applied_at || '',
+                request.approver_name || '',
+                request.reason || '',
+              ]);
+            });
+          } else {
+            leaveRequestRows.push([name, code, 'No leave requests found', '', '', '', '', '', '', '']);
+          }
+        } catch {
+          leaveRequestRows.push([name, code, 'Leave requests unavailable', '', '', '', '', '', '', '']);
+        }
+
+        try {
+          const salaryRes = await payrollService.getSalaryList(targetUserId);
+          const salaries = salaryRes.data || [];
+          if (salaries.length) {
+            salaries.forEach((salary) => {
+              salaryRows.push([
+                name,
+                code,
+                salary.ctc ?? '',
+                salary.effective_date ?? '',
+                salary.basic ?? salary.basic_salary ?? '',
+                salary.hra ?? '',
+                salary.da ?? '',
+                salary.transport ?? '',
+                salary.medical ?? '',
+                salary.other_allowance ?? salary.other_allowances ?? salary.special_allowance ?? '',
+                salary.gross ?? '',
+                salary.pf_employee ?? salary.pf_deduction ?? '',
+                salary.esi_employee ?? '',
+                salary.pt ?? '',
+                salary.total_deductions ?? '',
+                salary.net_pay ?? salary.net_salary ?? '',
+              ]);
+            });
+          } else {
+            salaryRows.push([name, code, 'No salary structure configured', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+          }
+        } catch {
+          salaryRows.push([name, code, 'Salary unavailable', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+        }
+
+        try {
+          const payslipsRes = await payrollService.getMyPayslips(targetUserId, dateFrom || undefined, dateTo || undefined);
+          const slips = Array.isArray(payslipsRes.data) ? payslipsRes.data : [];
+          if (slips.length) {
+            slips.forEach((slip: any) => {
+              const period = slip.month && slip.year
+                ? new Date(slip.year, slip.month - 1).toLocaleString('en-US', { month: 'long', year: 'numeric' })
+                : 'N/A';
+              payslipRows.push([
+                name,
+                code,
+                period,
+                slip.status || 'N/A',
+                slip.gross_earnings ?? slip.gross ?? '',
+                slip.total_deductions ?? '',
+                slip.net_salary ?? slip.net_pay ?? '',
+              ]);
+            });
+          } else {
+            payslipRows.push([name, code, 'No payslips generated', '', '', '', '']);
+          }
+        } catch {
+          payslipRows.push([name, code, 'Payslips unavailable', '', '', '', '']);
+        }
+      }
+    } finally {
+      setSubmitting(false);
+    }
+
+    const sheets: { name: string; rows: unknown[][] }[] = [
+      { name: selectedEmployee ? 'Employee Details' : 'All Users', rows: rosterRows },
+      { name: 'Attendance', rows: attendanceRows },
+      { name: 'Leave Balance', rows: leaveBalanceRows },
+      { name: 'Leave Requests', rows: leaveRequestRows },
+      { name: 'Payroll Salary', rows: salaryRows },
+      { name: 'Payslips', rows: payslipRows },
+    ];
+
+    if (false && selectedEmployee) {
+      const salaryRows = selectedUserSalary
+        ? [
+            ['Field', 'Value'],
+            ['CTC', selectedUserSalary.ctc ?? 'N/A'],
+            ['Effective Date', selectedUserSalary.effective_date ?? 'N/A'],
+            ['Basic', selectedUserSalary.basic ?? 'N/A'],
+            ['HRA', selectedUserSalary.hra ?? 'N/A'],
+            ['DA', selectedUserSalary.da ?? 'N/A'],
+            ['Transport Allowance', selectedUserSalary.transport ?? 'N/A'],
+            ['Medical Allowance', selectedUserSalary.medical ?? 'N/A'],
+            ['Other Allowance', selectedUserSalary.other_allowance ?? 'N/A'],
+            ['Gross', selectedUserSalary.gross ?? 'N/A'],
+            ['PF Employee', selectedUserSalary.pf_employee ?? 'N/A'],
+            ['ESI Employee', selectedUserSalary.esi_employee ?? 'N/A'],
+            ['Professional Tax', selectedUserSalary.pt ?? 'N/A'],
+            ['Total Deductions', selectedUserSalary.total_deductions ?? 'N/A'],
+            ['Net Pay', selectedUserSalary.net_pay ?? 'N/A'],
+          ]
+        : [['Field', 'Value'], ['Salary Structure', 'No salary structure configured']];
+
+      sheets.push(
+        {
+          name: 'Leave Balance',
+          rows: [
+            ['Leave Type', 'Total', 'Used', 'Pending', 'Remaining'],
+            ...(selectedUserBalances.length
+              ? selectedUserBalances.map((balance) => [
+                  balance.leave_type_name,
+                  balance.total,
+                  balance.used,
+                  balance.pending,
+                  balance.remaining,
+                ])
+              : [['No leave balances found', '', '', '', '']]),
+          ],
+        },
+        {
+          name: 'Leave Requests',
+          rows: [
+            ['Status', 'Leave Type', 'Days', 'Start Date', 'End Date', 'Reason'],
+            ...(selectedUserLeaves.length
+              ? selectedUserLeaves.map((request) => [
+                  request.status,
+                  request.leave_type_name,
+                  request.days,
+                  request.start_date,
+                  request.end_date,
+                  request.reason,
+                ])
+              : [['No leave applications filed', '', '', '', '', '']]),
+          ],
+        },
+        { name: 'Salary', rows: salaryRows },
+        {
+          name: 'Payslips',
+          rows: [
+            ['Period', 'Status', 'Gross', 'Deductions', 'Net'],
+            ...(selectedUserPayslips.length
+              ? selectedUserPayslips.map((slip: any) => {
+                  const period = slip.month && slip.year
+                    ? new Date(slip.year, slip.month - 1).toLocaleString('en-US', { month: 'long', year: 'numeric' })
+                    : 'N/A';
+                  return [
+                    period,
+                    slip.status || 'N/A',
+                    slip.gross_earnings ?? slip.gross ?? 'N/A',
+                    slip.total_deductions ?? 'N/A',
+                    slip.net_salary ?? slip.net_pay ?? 'N/A',
+                  ];
+                })
+              : [['No payslips generated', '', '', '', '']]),
+          ],
+        }
+      );
+    }
+
+    const fileLabel = selectedEmployee
+      ? `${(selectedEmployee.display_name || selectedEmployee.username || 'employee').replace(/\s+/g, '_')}_HRMS_Report.xls`
+      : `HRMS_All_Users_Report_${dateInputValue(new Date())}.xls`;
+    downloadExcelWorkbook(fileLabel, sheets);
+    toast.success('Excel report downloaded');
+    return;
+
+    const selectedEmployeeForText = selectedEmployee as EmployeeOption;
+
+    const empName = selectedEmployeeForText.display_name || `${selectedEmployeeForText.first_name} ${selectedEmployeeForText.last_name}`.trim() || selectedEmployeeForText.username;
+    const empCode = selectedEmployeeForText.emp_code || 'N/A';
+    const empRole = roleLabel(selectedEmployeeForText.role);
 
     let report = `==================================================\n`;
     report += `             HRMS COMPREHENSIVE REPORT             \n`;
@@ -2008,7 +2395,7 @@ export function AttendancePage() {
     report += `Name: ${empName}\n`;
     report += `Employee Code: ${empCode}\n`;
     report += `Role/Designation: ${empRole}\n`;
-    report += `Department: ${selectedEmployee.department || 'N/A'}\n\n`;
+    report += `Department: ${selectedEmployeeForText.department || 'N/A'}\n\n`;
 
     report += `LEAVE BALANCE SUMMARY:\n`;
     report += `---------------------\n`;
@@ -2085,26 +2472,37 @@ export function AttendancePage() {
 
   const selectedManagerUserId = useMemo(() => {
     const selected = filteredEmployees.find((employee) => attendanceValue(employee) === selectedManagerId);
-    return selected?.user_id;
+    return selected ? String(selected.user_id) : '';
   }, [filteredEmployees, selectedManagerId]);
+
+  const selectedHrUserId = useMemo(() => {
+    const selected = filteredEmployees.find((employee) => attendanceValue(employee) === selectedHrId);
+    return selected ? String(selected.user_id) : '';
+  }, [filteredEmployees, selectedHrId]);
 
   const selectedTlUserId = useMemo(() => {
     const selected = filteredEmployees.find((employee) => attendanceValue(employee) === selectedTlId);
-    return selected?.user_id;
+    return selected ? String(selected.user_id) : '';
   }, [filteredEmployees, selectedTlId]);
+
+  const selectedReportingUserId = selectedManagerUserId || selectedHrUserId;
 
   // Hierarchical lists matching active selections & role limits
   const visibleManagers = useMemo(() => {
-    return filteredEmployees.filter((emp) => ['manager', 'hr'].includes(getRoleGroup(emp)));
+    return filteredEmployees.filter((emp) => getRoleGroup(emp) === 'manager');
+  }, [filteredEmployees]);
+
+  const visibleHrs = useMemo(() => {
+    return filteredEmployees.filter((emp) => getRoleGroup(emp) === 'hr');
   }, [filteredEmployees]);
 
   const visibleTls = useMemo(() => {
     let list = filteredEmployees.filter((emp) => getRoleGroup(emp) === 'tl');
-    if (selectedManagerUserId) {
-      list = list.filter((emp) => Number(emp.manager) === selectedManagerUserId);
+    if (selectedReportingUserId) {
+      list = list.filter((emp) => String(emp.manager ?? '') === selectedReportingUserId);
     }
     return list;
-  }, [filteredEmployees, selectedManagerUserId]);
+  }, [filteredEmployees, selectedReportingUserId]);
 
   const visibleEmployees = useMemo(() => {
     let list = filteredEmployees.filter((emp) => {
@@ -2113,13 +2511,12 @@ export function AttendancePage() {
     });
 
     if (selectedTlUserId) {
-      list = list.filter((emp) => Number(emp.manager) === selectedTlUserId);
-    } else if (selectedManagerUserId) {
-      const tlsUnderManager = visibleTls.map(t => t.user_id);
-      list = list.filter((emp) => Number(emp.manager) === selectedManagerUserId || tlsUnderManager.includes(Number(emp.manager) || 0));
+      list = list.filter((emp) => String(emp.manager ?? '') === selectedTlUserId);
+    } else if (selectedReportingUserId) {
+      list = list.filter((emp) => String(emp.manager ?? '') === selectedReportingUserId);
     }
     return list;
-  }, [filteredEmployees, selectedTlUserId, selectedManagerUserId, visibleTls]);
+  }, [filteredEmployees, selectedTlUserId, selectedReportingUserId]);
 
   return (
     <div className="space-y-6">
@@ -2152,20 +2549,21 @@ export function AttendancePage() {
               <span className="text-xs font-bold uppercase tracking-wider">Filters</span>
             </div>
 
-            {/* Managers / HR select (SuperAdmin / HR only) */}
-            {(isSuperAdmin || isHr) && (
+            {/* Managers select (admins only) */}
+            {isAdmin && (
               <select
                 value={selectedManagerId}
                 onChange={(e) => {
                   const val = e.target.value;
                   setSelectedManagerId(val);
+                  setSelectedHrId('');
                   setSelectedTlId('');
                   setSelectedEmployeeId('');
                   setEmployeeFilter(val);
                 }}
                 className="h-9 rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-foreground font-semibold outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-all cursor-pointer min-w-[150px]"
               >
-                <option value="">MANAGERS / HR</option>
+                <option value="">MANAGERS</option>
                 {visibleManagers.map((m) => (
                   <option key={m.user_id} value={attendanceValue(m)}>
                     {m.display_name || `${m.first_name} ${m.last_name}`.trim() || m.username}
@@ -2174,15 +2572,38 @@ export function AttendancePage() {
               </select>
             )}
 
+            {/* HR select */}
+            {(isAdmin || isManager) && (
+              <select
+                value={selectedHrId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSelectedHrId(val);
+                  setSelectedManagerId('');
+                  setSelectedTlId('');
+                  setSelectedEmployeeId('');
+                  setEmployeeFilter(val);
+                }}
+                className="h-9 rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-foreground font-semibold outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-all cursor-pointer min-w-[130px]"
+              >
+                <option value="">HR</option>
+                {visibleHrs.map((hr) => (
+                  <option key={hr.user_id} value={attendanceValue(hr)}>
+                    {hr.display_name || `${hr.first_name} ${hr.last_name}`.trim() || hr.username}
+                  </option>
+                ))}
+              </select>
+            )}
+
             {/* Team Leaders select */}
-            {(isSuperAdmin || isHr || isManager) && (
+            {(isAdmin || isHr || isManager) && (
               <select
                 value={selectedTlId}
                 onChange={(e) => {
                   const val = e.target.value;
                   setSelectedTlId(val);
                   setSelectedEmployeeId('');
-                  setEmployeeFilter(val || selectedManagerId);
+                  setEmployeeFilter(val || selectedManagerId || selectedHrId);
                 }}
                 className="h-9 rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-foreground font-semibold outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-all cursor-pointer min-w-[150px]"
               >
@@ -2196,13 +2617,13 @@ export function AttendancePage() {
             )}
 
             {/* Employees select */}
-            {(isSuperAdmin || isHr || isManager || isTl) && (
+            {(isAdmin || isHr || isManager || isTl) && (
               <select
                 value={selectedEmployeeId}
                 onChange={(e) => {
                   const val = e.target.value;
                   setSelectedEmployeeId(val);
-                  setEmployeeFilter(val || selectedTlId || selectedManagerId);
+                  setEmployeeFilter(val || selectedTlId || selectedManagerId || selectedHrId);
                 }}
                 className="h-9 rounded-lg border border-border bg-background px-3 py-1.5 text-xs text-foreground font-semibold outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-all cursor-pointer min-w-[150px]"
               >
@@ -2262,6 +2683,18 @@ export function AttendancePage() {
             >
               Reset
             </button>
+
+            <Button
+              size="sm"
+              type="button"
+              onClick={downloadEmployeeReport}
+              disabled={loading || employees.length === 0}
+              variant="outline"
+              className="h-9 font-bold text-xs rounded-lg px-4 flex items-center gap-1.5 transition-all shadow-sm"
+            >
+              <Users className="h-3.5 w-3.5" />
+              Export Excel
+            </Button>
 
             {/* UPDATE button */}
             <Button
@@ -2382,7 +2815,7 @@ export function AttendancePage() {
                 </button>
               </div>
 
-              {selectedUserDetailsLoading ? (
+              {false && selectedUserDetailsLoading ? (
                 <div className="flex justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-indigo-500" />
                 </div>
@@ -2933,6 +3366,14 @@ export function AttendancePage() {
                                   <span className="text-muted-foreground font-medium">Your Distance</span>
                                   <span className={cn('font-bold', withinRadius ? 'text-emerald-600' : 'text-rose-600')}>
                                     {gpsDistance === null ? 'Waiting for GPS' : `${Math.round(gpsDistance)} meters`}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between border-b pb-2">
+                                  <span className="text-muted-foreground font-medium">Location Used</span>
+                                  <span className="font-mono text-[10px] font-bold text-foreground">
+                                    {locationPoint
+                                      ? `${locationPoint.source}: ${locationPoint.latitude.toFixed(6)}, ${locationPoint.longitude.toFixed(6)}`
+                                      : 'Waiting for GPS'}
                                   </span>
                                 </div>
                                 <div className="flex items-center justify-between">

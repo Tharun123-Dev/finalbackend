@@ -54,35 +54,42 @@ interface JavaUser {
   profileData?: Record<string, unknown> | null;
 }
 
-const asArray = <T>(payload: T[] | { data?: T[]; content?: T[]; results?: T[] } | unknown): T[] => {
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+const asArray = <T>(
+  payload: T[] | { data?: T[]; content?: T[]; results?: T[] } | unknown
+): T[] => {
   if (Array.isArray(payload)) return payload;
   if (payload && typeof payload === 'object') {
-    const wrapped = payload as { data?: T[]; content?: T[]; results?: T[] };
-    return wrapped.data || wrapped.content || wrapped.results || [];
+    const w = payload as { data?: T[]; content?: T[]; results?: T[] };
+    return w.data || w.content || w.results || [];
   }
   return [];
 };
 
 const normalizeId = (value: unknown) => String(value ?? '').trim();
-const normalizeRole = (value?: string | null) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
 
-const javaId = (user: JavaUser) => normalizeId(user.id ?? user.userId ?? user.user_id);
+const normalizeRole = (value?: string | null) =>
+  String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+
+const javaId = (user: JavaUser) =>
+  normalizeId(user.id ?? user.userId ?? user.user_id);
 
 const javaSupervisorId = (user: JavaUser) => {
-  const profile = user.profileData || {};
+  const p = user.profileData || {};
   return normalizeId(
     user.supervisorUserId ??
     user.supervisor_user_id ??
     user.reportingToUserId ??
     user.managerId ??
-    profile.reporting_supervisor_id ??
-    profile.reportingSupervisorId ??
-    profile.supervisorUserId ??
-    profile.managerId
+    p.reporting_supervisor_id ??
+    p.reportingSupervisorId ??
+    p.supervisorUserId ??
+    p.managerId
   );
 };
 
-const baseRoleFromJavaRole = (value?: string | null) => {
+const baseRoleFromJavaRole = (value?: string | null): string => {
   const role = normalizeRole(value);
   if (!role) return 'employee';
   if (role.includes('super') && role.includes('admin')) return 'superadmin';
@@ -94,61 +101,59 @@ const baseRoleFromJavaRole = (value?: string | null) => {
   return 'employee';
 };
 
-const currentUserIds = (me: JavaUser | null) => {
+/**
+ * All IDs that can be considered "me"
+ * (covers camelCase / snake_case / JWT variants).
+ */
+const currentUserIds = (me: JavaUser | null): Set<string> => {
   const ids = new Set<string>();
   if (me) {
-    ids.add(javaId(me));
-    ids.add(normalizeId(me.id));
-    ids.add(normalizeId(me.userId));
-    ids.add(normalizeId(me.user_id));
+    [me.id, me.userId, me.user_id].forEach((v) => ids.add(normalizeId(v)));
   }
   try {
     const token = localStorage.getItem('token');
     if (token) {
       const payload = JSON.parse(atob(token.split('.')[1]));
-      ids.add(normalizeId(payload.id));
-      ids.add(normalizeId(payload.userId));
-      ids.add(normalizeId(payload.user_id));
-      ids.add(normalizeId(payload.sub));
+      [payload.id, payload.userId, payload.user_id, payload.sub].forEach((v) =>
+        ids.add(normalizeId(v))
+      );
     }
   } catch {
-    // Ignore malformed session payloads; backend calls still enforce access.
+    // Ignore malformed tokens
   }
   return new Set(Array.from(ids).filter(Boolean));
 };
 
-const isSuperAdminSession = (me: JavaUser | null) => {
-  const storedRole = localStorage.getItem('role');
-  const permissions = (() => {
-    try {
-      return JSON.parse(localStorage.getItem('permissions') || '[]') as string[];
-    } catch {
-      return [];
-    }
-  })();
-  const role = normalizeRole(me?.roleName || me?.role || storedRole);
-  return permissions.includes('*') || (role.includes('super') && role.includes('admin'));
-};
+// ─── Core: build full reporting subtree for ANY user ────────────────────────
 
-const isHrSession = (me: JavaUser | null) => {
-  const storedRole = localStorage.getItem('role');
-  const role = normalizeRole(me?.roleName || me?.role || storedRole);
-  return role.includes('hr') || role.includes('human_resource');
-};
-
-const scopedJavaUsers = (javaUsers: JavaUser[], me: JavaUser | null) => {
-  const activeUsers = javaUsers.filter((user) => user.active !== false && javaId(user));
-  if (isSuperAdminSession(me) || isHrSession(me)) return activeUsers;
-
+/**
+ * BFS walk DOWN the supervisor → subordinate tree starting from `rootIds`.
+ *
+ * Returns every active user whose supervisor chain leads back to one of the
+ * root IDs — regardless of THEIR role or the CURRENT USER's role.
+ *
+ * This is the single generic function that powers all role-based filtering:
+ *   - Employee   sees only their own direct/indirect reports
+ *   - TL         sees their direct/indirect reports
+ *   - Manager    sees their direct/indirect reports
+ *   - HR         sees their direct/indirect reports
+ *   - SuperAdmin sees their direct/indirect reports
+ *
+ * No special-casing per role. The tree structure decides visibility.
+ */
+const buildReportingSubtree = (
+  allActive: JavaUser[],
+  rootIds: Set<string>
+): JavaUser[] => {
   const visible = new Set<string>();
-  let frontier = Array.from(currentUserIds(me));
+  let frontier = Array.from(rootIds);
 
   while (frontier.length) {
     const next: string[] = [];
-    activeUsers.forEach((user) => {
+    allActive.forEach((user) => {
       const id = javaId(user);
-      const supervisorId = javaSupervisorId(user);
-      if (supervisorId && frontier.includes(supervisorId) && !visible.has(id)) {
+      const supId = javaSupervisorId(user);
+      if (supId && frontier.includes(supId) && !visible.has(id)) {
         visible.add(id);
         next.push(id);
       }
@@ -156,22 +161,36 @@ const scopedJavaUsers = (javaUsers: JavaUser[], me: JavaUser | null) => {
     frontier = next;
   }
 
-  return activeUsers.filter((user) => {
-    if (!visible.has(javaId(user))) return false;
-    const role = baseRoleFromJavaRole(user.roleName || user.role);
-    return role !== 'superadmin' && role !== 'admin' && role !== 'hr';
+  return allActive.filter((u) => visible.has(javaId(u)));
+};
+
+// ─── Dedup & transform ───────────────────────────────────────────────────────
+
+const dedupeJavaUsers = (users: JavaUser[]): JavaUser[] => {
+  const seen = new Set<string>();
+  return users.filter((user) => {
+    const id = javaId(user);
+    const email = normalizeId(user.email || user.username).toLowerCase();
+    const key = id ? `id:${id}` : `email:${email}`;
+    if (!key || key === 'email:' || seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 };
 
 const javaUserToEmployee = (user: JavaUser): EmployeeOption => {
-  const profile = user.profileData || {};
+  const p = user.profileData || {};
   const id = javaId(user);
   const firstName = user.firstName || user.first_name || '';
   const lastName = user.lastName || user.last_name || '';
   const username = user.username || user.email || `user-${id}`;
   const displayName = `${firstName} ${lastName}`.trim() || user.name || username;
   const role = user.roleName || user.role || 'Employee';
-  const empCode = user.employeeId || user.emp_code || String(profile.emp_code || profile.employeeId || profile.employee_id || `USR-${id}`);
+  const empCode =
+    user.employeeId ||
+    user.emp_code ||
+    String(p.emp_code || p.employeeId || p.employee_id || `USR-${id}`);
+
   const attendanceId = [
     'java',
     id,
@@ -194,72 +213,143 @@ const javaUserToEmployee = (user: JavaUser): EmployeeOption => {
     email: user.email || '',
     role,
     base_role: baseRoleFromJavaRole(role),
-    employee_type: String(profile.employee_type || profile.employeeType || 'regular'),
-    department: profile.department_id ? Number(profile.department_id) : null,
-    department_name: profile.department_name ? String(profile.department_name) : null,
-    designation: profile.designation ? String(profile.designation) : null,
-    work_mode: profile.work_mode ? String(profile.work_mode) : null,
+    employee_type: String(p.employee_type || p.employeeType || 'regular'),
+    department: p.department_id ? Number(p.department_id) : null,
+    department_name: p.department_name ? String(p.department_name) : null,
+    designation: p.designation ? String(p.designation) : null,
+    work_mode: p.work_mode ? String(p.work_mode) : null,
     manager: Number(javaSupervisorId(user)) || null,
-    manager_name: user.supervisorName || user.managerName || String(profile.reporting_supervisor_name || profile.reportingSupervisorName || '') || null,
-    joining_date: String(profile.joining_date || profile.joiningDate || ''),
+    manager_name:
+      user.supervisorName ||
+      user.managerName ||
+      String(p.reporting_supervisor_name || p.reportingSupervisorName || '') ||
+      null,
+    joining_date: String(p.joining_date || p.joiningDate || ''),
   };
 };
 
-const mergeEmployees = (lapEmployees: EmployeeOption[], javaUsers: JavaUser[]) => {
+const mergeEmployees = (
+  lapEmployees: EmployeeOption[],
+  javaUsers: JavaUser[]
+): EmployeeOption[] => {
   const merged = new Map<string, EmployeeOption>();
-  lapEmployees.forEach((employee) => {
-    const key = employee.email ? `email:${employee.email.toLowerCase()}` : `id:${employee.user_id}`;
-    merged.set(key, employee);
+  lapEmployees.forEach((emp) => {
+    const key = emp.email ? `email:${emp.email.toLowerCase()}` : `id:${emp.user_id}`;
+    merged.set(key, emp);
   });
   javaUsers.forEach((user) => {
-    const employee = javaUserToEmployee(user);
-    const key = employee.email ? `email:${employee.email.toLowerCase()}` : `java:${javaId(user)}`;
+    const emp = javaUserToEmployee(user);
+    const key = emp.email ? `email:${emp.email.toLowerCase()}` : `java:${javaId(user)}`;
     const existing = merged.get(key);
     merged.set(key, {
-      ...employee,
+      ...emp,
       ...(existing || {}),
-      attendance_id: existing?.attendance_id || employee.attendance_id,
-      manager: existing?.manager ?? employee.manager,
-      manager_name: existing?.manager_name ?? employee.manager_name,
-      role: existing?.role || employee.role,
-      base_role: existing?.base_role || employee.base_role,
-      joining_date: existing?.joining_date || employee.joining_date,
+      attendance_id: existing?.attendance_id || emp.attendance_id,
+      manager: existing?.manager ?? emp.manager,
+      manager_name: existing?.manager_name ?? emp.manager_name,
+      role: existing?.role || emp.role,
+      base_role: existing?.base_role || emp.base_role,
+      joining_date: existing?.joining_date || emp.joining_date,
     });
   });
   return sortEmployees(Array.from(merged.values()));
 };
 
-const dedupeJavaUsers = (javaUsers: JavaUser[]) => {
-  const seen = new Set<string>();
-  return javaUsers.filter((user) => {
-    const id = javaId(user);
-    const email = normalizeId(user.email || user.username).toLowerCase();
-    const key = id ? `id:${id}` : `email:${email}`;
-    if (!key || key === 'email:' || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-};
+// ─── Service ─────────────────────────────────────────────────────────────────
 
 export const employeeService = {
-  list: async (params: { role?: string; department?: string; active?: boolean; search?: string } = {}) => {
-    const meRes = await rolesApi.get<JavaUser>('/users/me', { ignore403: true }).catch(() => ({ data: null as JavaUser | null }));
-    const me = meRes.data || null;
+  /**
+   * List employees with **dynamic reporting-tree scoping**.
+   *
+   * Rule (applies to EVERY role — Employee, TL, Manager, HR, SuperAdmin):
+   *   • No filter active  → show all active users (original behaviour)
+   *   • role filter OR reportingOnly=true → show ONLY users from
+   *     the current user's reporting subtree, then apply the role filter
+   *
+   * Examples:
+   *   hr1 hr1 calls list({ role: 'EMPLOYEE' })
+   *     → returns only Employees who report (directly/indirectly) to hr1
+   *
+   *   manager calls list({ role: 'TEAM LEADERS' })
+   *     → returns only TLs who report (directly/indirectly) to manager
+   *
+   *   tl1 calls list({ role: 'EMPLOYEE' })
+   *     → returns only Employees who report (directly/indirectly) to tl1
+   *
+   * @param params.role          Role label to filter by (e.g. 'EMPLOYEE', 'TEAM LEADERS', 'HR')
+   * @param params.reportingOnly Scope to reporting subtree even without a role filter
+   * @param params.department    Optional department filter
+   * @param params.search        Optional name/email search
+   * @param params.active        Optional active-status filter
+   */
+  list: async (
+    params: {
+      role?: string;
+      department?: string;
+      active?: boolean;
+      search?: string;
+      /** When true, restricts results to current user's reporting subtree */
+      reportingOnly?: boolean;
+    } = {}
+  ) => {
+    const { reportingOnly, ...apiParams } = params;
 
+    // 1. Resolve current user identity
+    const meRes = await rolesApi
+      .get<JavaUser>('/users/me', { ignore403: true })
+      .catch(() => ({ data: null as JavaUser | null }));
+    const me = meRes.data || null;
+    const myIds = currentUserIds(me);
+
+    // 2. Fetch LAP employees + Java users in parallel
     const [lapRes, usersRes] = await Promise.all([
-      rolesApi.get<EmployeeOption[]>('/employees/', { params, ignore403: true }).catch(() => ({ data: [] as EmployeeOption[] })),
-      rolesApi.get<JavaUser[] | { data?: JavaUser[]; content?: JavaUser[]; results?: JavaUser[] }>('/users', {
-        params: { search: params.search || undefined },
-        ignore403: true,
-      }).catch(() => ({ data: [] as JavaUser[] })),
+      rolesApi
+        .get<EmployeeOption[]>('/employees/', { params: apiParams, ignore403: true })
+        .catch(() => ({ data: [] as EmployeeOption[] })),
+      rolesApi
+        .get<JavaUser[] | { data?: JavaUser[]; content?: JavaUser[]; results?: JavaUser[] }>(
+          '/users',
+          { params: { search: apiParams.search || undefined }, ignore403: true }
+        )
+        .catch(() => ({ data: [] as JavaUser[] })),
     ]);
 
-    const javaUsers = asArray<JavaUser>(usersRes.data);
-    const javaEmployees = scopedJavaUsers(dedupeJavaUsers(javaUsers), me).map(javaUserToEmployee);
+    // 3. Dedupe and keep only active users
+    const allActive = dedupeJavaUsers(asArray<JavaUser>(usersRes.data)).filter(
+      (u) => u.active !== false && javaId(u)
+    );
+
+    // 4. Dynamic scoping decision:
+    //    role filter present OR reportingOnly=true
+    //      → scope to reporting subtree of the current user (ALL roles treated equally)
+    //    no filter
+    //      → return all active users
+    const shouldScopeToReports = !!(apiParams.role || reportingOnly);
+
+    const scopedUsers = shouldScopeToReports
+      ? buildReportingSubtree(allActive, myIds)
+      : allActive;
+
+    // 5. Apply role filter on the scoped list (client-side match)
+    //    Matches raw role string OR derived base_role, both normalized.
+    //    e.g. 'TEAM LEADERS' → normalizes to 'team_leaders' → matches base 'tl'
+    const roleFilter = normalizeRole(apiParams.role);
+    const filtered = roleFilter
+      ? scopedUsers.filter((user) => {
+          const raw = normalizeRole(user.roleName || user.role);
+          const base = baseRoleFromJavaRole(user.roleName || user.role);
+          return raw.includes(roleFilter) || base === roleFilter || raw === roleFilter;
+        })
+      : scopedUsers;
+
+    // 6. Transform and return
+    const javaEmployees = filtered.map(javaUserToEmployee);
 
     return {
       ...lapRes,
-      data: javaEmployees.length ? sortEmployees(javaEmployees) : mergeEmployees(lapRes.data || [], []),
+      data: javaEmployees.length
+        ? sortEmployees(javaEmployees)
+        : mergeEmployees(lapRes.data || [], []),
     };
   },
 };

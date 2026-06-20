@@ -139,7 +139,10 @@ CORS_ALLOWED_ORIGINS = [
     'https://lap-phi.vercel.app',
     'https://lapsystem.vercel.app',
     'http://100.104.235.68:5173',
-    'http://100.85.146.60:5173'
+    'http://100.85.146.60:5173',
+    'http://100.121.237.45:5174',
+     'http://localhost:5174',
+       'http://100.85.146.60:5174'
 ]
 
 _frontend = os.getenv('FRONTEND_URL', '')
@@ -172,7 +175,10 @@ CSRF_TRUSTED_ORIGINS = [
     'https://lapsystem.vercel.app',
     'https://lap-b9vi.onrender.com',
     'http://100.104.235.68:5173',
-    'http://100.85.146.60:5173/'
+    'http://100.85.146.60:5173/',
+     'http://100.121.237.45:5174',
+     'http://localhost:5174',
+      'http://100.85.146.60:5174',
 ]
 
 # ==========================

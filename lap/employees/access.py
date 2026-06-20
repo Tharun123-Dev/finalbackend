@@ -8,7 +8,7 @@ from accounts.models import User
 from accounts.tenant_utils import get_tenant_id
 
 
-ADMIN_ROLES = {'superadmin'}
+ADMIN_ROLES = {'superadmin', 'admin'}
 HR_ROLES = {'hr'}
 MANAGER_ROLES = {'admin', 'hr', 'manager'}
 TEAM_LEAD_DESIGNATIONS = {'team_lead', 'project_manager', 'hr_manager'}
@@ -37,11 +37,11 @@ def normalized_role(user):
 
 def is_hrms_admin(user):
     role = normalized_role(user)
-    if bool(getattr(user, 'is_superuser', False)) or role in {'superadmin', 'admin', 'hr'}:
+    if bool(getattr(user, 'is_superuser', False)) or role in ADMIN_ROLES:
         return True
     if bool(getattr(user, '_java_is_superuser', False)):
         return True
-    if getattr(user, '_java_base_role', None) in {'superadmin', 'admin', 'hr'}:
+    if getattr(user, '_java_base_role', None) in ADMIN_ROLES:
         return True
     return False
 
@@ -433,20 +433,38 @@ def visible_user_queryset(request, include_self=True):
             return qs.order_by('first_name', 'last_name', 'username')
         return qs.exclude(id=user.id).order_by('first_name', 'last_name', 'username')
 
-    has_reports = qs.filter(profile__manager_id=user.id).exists()
-    if is_manager_like(user) or has_reports:
-        seen = set()
-        queue = [user.id]
-        while queue:
-            curr_id = queue.pop(0)
-            direct_ids = list(qs.filter(profile__manager_id=curr_id).values_list('id', flat=True))
-            for d_id in direct_ids:
-                if d_id not in seen:
-                    seen.add(d_id)
-                    queue.append(d_id)
+    def direct_report_ids(root_id):
+        return set(qs.filter(profile__manager_id=root_id).values_list('id', flat=True))
+
+    current_group = role_group(user)
+    allowed_groups_by_role = {
+        'hr': {'team_lead', 'employee'},
+        'manager': {'hr', 'team_lead', 'employee'},
+        'team_lead': {'employee'},
+    }
+
+    scoped_ids = direct_report_ids(user.id)
+    if scoped_ids:
+        allowed_groups = allowed_groups_by_role.get(current_group)
+        scoped_qs = qs.filter(id__in=scoped_ids)
+        if allowed_groups:
+            scoped_ids = {
+                scoped_user.id
+                for scoped_user in scoped_qs
+                if role_group(scoped_user) in allowed_groups
+            }
         if include_self:
-            seen.add(user.id)
-        return qs.filter(id__in=seen).order_by('first_name', 'last_name', 'username')
+            scoped_ids.add(user.id)
+        return qs.filter(id__in=scoped_ids).order_by('first_name', 'last_name', 'username')
+
+    if is_hr_user(user):
+        return qs.filter(
+            Q(role__in=['employee']) |
+            Q(profile__designation__in=TEAM_LEAD_DESIGNATIONS)
+        ).order_by('first_name', 'last_name', 'username')
+
+    if is_manager_like(user):
+        return qs.none()
 
     if include_self:
         return qs.filter(id=user.id)
