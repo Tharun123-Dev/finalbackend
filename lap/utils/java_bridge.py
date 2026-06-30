@@ -131,13 +131,13 @@ def list_users(token: str):
     candidates = getattr(settings, 'JAVA_USERS_PATHS', None) or [
         'api/users',
         'api/auth/users',
-        'users',
         'api/user',
     ]
 
     users = []
     seen = set()
     requested_paths = set()
+    received_response = False
 
     def add_user(item):
         if not isinstance(item, dict):
@@ -203,10 +203,14 @@ def list_users(token: str):
         return f'{path}{separator}{urllib.parse.urlencode(clean_params)}'
 
     def request_path(path):
+        nonlocal received_response
         if path in requested_paths:
             return None
         requested_paths.add(path)
-        return _request_json(base_url, path, token, timeout=4)
+        payload = _request_json(base_url, path, token, timeout=4)
+        if payload is not None:
+            received_response = True
+        return payload
 
     for path in candidates:
         payload = request_path(path)
@@ -234,6 +238,8 @@ def list_users(token: str):
                     break
                 if total_pages is not None and current_page is not None and current_page + 1 >= total_pages:
                     break
+    if not users and not received_response:
+        return None
     return users
 
 
@@ -262,4 +268,3 @@ def list_role_hierarchy(token: str):
                 if isinstance(val, list):
                     return val
     return []
-

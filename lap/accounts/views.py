@@ -160,8 +160,9 @@ def _local_user_option(user):
 
 
 def _local_visible_user_queryset(request, include_self=True):
-    from employees.access import is_hrms_admin, is_manager_like
+    from employees.access import _sync_java_reporting_users, is_hrms_admin, is_manager_like
 
+    _sync_java_reporting_users(request)
     tenant_id = get_tenant_id(request)
     qs = User.objects.filter(tenant_id=tenant_id, is_active=True).select_related(
         'profile', 'profile__department', 'profile__manager', 'custom_role'

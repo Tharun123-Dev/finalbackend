@@ -293,14 +293,23 @@ def _sync_java_reporting_users(request):
         return
 
     try:
-        java_users = [item for item in list_users(token) if isinstance(item, dict) and item.get('active', True) is not False]
+        fetched_java_users = list_users(token)
     except Exception:
         return
+    if fetched_java_users is None:
+        return
+
+    java_users = [
+        item for item in fetched_java_users
+        if isinstance(item, dict) and item.get('active', True) is not False
+    ]
+
+    tenant_id = get_tenant_id(request)
+    _delete_local_users_missing_from_java(tenant_id, java_users)
 
     if not java_users:
         return
 
-    tenant_id = get_tenant_id(request)
     users_by_java_id = {}
     users_by_email = {}
 
@@ -403,21 +412,25 @@ def _sync_java_reporting_users(request):
         except Exception:
             pass
 
-    # Deactivate active Django users who are not present in the Java backend list
+    _delete_local_users_missing_from_java(tenant_id, java_users)
+
+
+def _delete_local_users_missing_from_java(tenant_id, java_users):
     try:
-        java_emails = {str(_java_value(ju, 'email', 'username') or '').strip().lower() for ju in java_users}
-        java_emails = {e for e in java_emails if e}
-        if java_emails:
-            active_django_users = User.objects.filter(tenant_id=tenant_id, is_active=True)
-            for django_user in active_django_users:
-                if django_user.is_superuser or django_user.id == request.user.id:
-                    continue
-                email_normalized = str(django_user.email or '').strip().lower()
-                if email_normalized not in java_emails:
-                    django_user.is_active = False
-                    django_user.save(update_fields=['is_active'])
+        java_emails = {
+            str(_java_value(ju, 'email', 'username') or '').strip().lower()
+            for ju in java_users
+        }
+        java_emails = {email for email in java_emails if email}
+        stale_user_ids = []
+        for local_user in User.objects.filter(tenant_id=tenant_id, is_superuser=False).only('id', 'email'):
+            local_email = str(local_user.email or '').strip().lower()
+            if not java_emails or local_email not in java_emails:
+                stale_user_ids.append(local_user.id)
+        if stale_user_ids:
+            User.objects.filter(id__in=stale_user_ids).delete()
     except Exception as e:
-        print("Error during user deactivation sync:", e)
+        print("Error during user delete sync:", e)
 
 
 def visible_user_queryset(request, include_self=True):
