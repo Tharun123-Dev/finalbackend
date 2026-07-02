@@ -17,6 +17,7 @@ ALLOWED_HOSTS += [
     'localhost',
     '127.0.0.1',
     '100.121.237.45',
+    'https://frontend-application.duckdns.org'
 ]
 
 INSTALLED_APPS = [
@@ -142,7 +143,8 @@ CORS_ALLOWED_ORIGINS = [
     'http://100.85.146.60:5173',
     'http://100.121.237.45:5174',
     'http://localhost:5174',
-    'http://100.85.146.60:5174'
+    'http://100.85.146.60:5174',
+    'https://frontend-application.duckdns.org'
 ]
 
 _frontend = os.getenv('FRONTEND_URL', '')
@@ -179,6 +181,7 @@ CSRF_TRUSTED_ORIGINS = [
      'http://100.121.237.45:5174',
      'http://localhost:5174',
       'http://100.85.146.60:5174',
+      'https://frontend-application.duckdns.org'
 ]
 
 # ==========================
@@ -205,12 +208,14 @@ JAVA_JWT_SECRET = os.getenv(
 
 JAVA_AUTH_BASE_URL = os.getenv(
     'JAVA_AUTH_BASE_URL',
-    'http://100.85.146.60:8080/api/auth',
+    # 'http://100.85.146.60:8080/api/auth',
+     'http://32.199.180.3:8080/api/auth',
 )
 
 JAVA_API_BASE_URL = os.getenv(
     'JAVA_API_BASE_URL',
-    'http://100.85.146.60:8080',
+    # 'http://100.85.146.60:8080',
+     'http://32.199.180.3:8080',
 )
 
 JAVA_USERS_PATHS = [
